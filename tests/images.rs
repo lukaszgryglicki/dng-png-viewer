@@ -41,20 +41,20 @@ fn every_code_and_window_is_saturating_not_wrapping() {
 }
 
 #[test]
-fn twelve_bit_example_and_middle_window() {
+fn twelve_bit_example_defaults_to_the_full_range_window() {
     let Inspection::Dr(info) = gray(&[0, 1, 255, 256, 4095]).info else {
         panic!()
     };
     assert_eq!((info.minimum, info.maximum, info.code_bits), (0, 4095, 12));
     assert_eq!(
         (info.max_shift, info.initial_shift, info.occupied_levels),
-        (4, 2, 5)
+        (4, 4, 5)
     );
     assert_eq!(info.sample_span_bits, 12.0);
 }
 
 #[test]
-fn all_depths_choose_the_lower_middle_window() {
+fn all_depths_default_to_the_window_without_extra_highlight_clipping() {
     for bits in 0..=16u32 {
         let maximum = ((1u32 << bits) - 1) as u16;
         let Inspection::Dr(info) = gray(&[0, maximum]).info else {
@@ -62,7 +62,8 @@ fn all_depths_choose_the_lower_middle_window() {
         };
         assert_eq!(info.code_bits, bits);
         assert_eq!(info.max_shift, bits.saturating_sub(8));
-        assert_eq!(info.initial_shift, info.max_shift / 2);
+        assert_eq!(info.initial_shift, info.max_shift);
+        assert!(u32::from(maximum) / 2u32.pow(info.initial_shift) <= 255);
     }
 }
 
@@ -117,7 +118,7 @@ fn png_preserves_every_sixteen_bit_code_and_linear_gamma() {
         (info.width, info.height, info.occupied_levels),
         (256, 256, 65536)
     );
-    assert_eq!((info.max_shift, info.initial_shift), (8, 4));
+    assert_eq!((info.max_shift, info.initial_shift), (8, 8));
     assert_eq!(images::inspect(&path).unwrap(), loaded.info);
     assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);

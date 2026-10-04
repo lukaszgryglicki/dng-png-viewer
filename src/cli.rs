@@ -14,7 +14,10 @@ use std::{
 #[command(version, about = "Native fullscreen Gray16 bit-window viewer for X11 and KMSDRM consoles.",
     group(ArgGroup::new("sources").required(true).multiple(true).args(["images", "directories"])),
     after_help = "Fit mode: LEFT/RIGHT previous/next; UP brighter, DOWN darker; Z native 1:1.\n\
-        Native mode: arrows pan; X returns to fit. ESC exits.\n\
+        Native mode: arrows pan toward the requested image edge; X returns to fit.\n\
+        ESC, Q or Ctrl+C exits with cleanup in both desktop and console modes.\n\
+        DR starts at the full-range window without extra highlight clipping.\n\
+        FreeBSD console: active physical text VT only, not SSH/tmux; switching VTs exits.\n\
         Single-dash long options work: -dir /photos -shuffle.\n\
         Use --dir instead of a shell glob that exceeds the OS argument limit.")]
 pub struct Cli {

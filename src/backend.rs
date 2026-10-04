@@ -1,11 +1,13 @@
 use crate::{
+    console::Console,
     images::{self, Inspection, LoadedImage},
+    signals::StopSignals,
     view::{self, Effect, Key, Mode, Size, View},
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use sdl2::{
     event::{Event, WindowEvent},
-    keyboard::Keycode,
+    keyboard::{Keycode, Mod},
     pixels::PixelFormatEnum,
 };
 use std::{
@@ -26,6 +28,28 @@ pub fn video_driver(display: Option<&OsStr>, wayland: Option<&OsStr>) -> &'stati
     }
 }
 
+pub fn selected_driver(
+    explicit: Option<&OsStr>,
+    display: Option<&OsStr>,
+    wayland: Option<&OsStr>,
+) -> Result<String> {
+    let driver = match explicit.filter(|value| !value.is_empty()) {
+        Some(value) => value
+            .to_str()
+            .context("SDL_VIDEODRIVER must be valid UTF-8")?,
+        None => video_driver(display, wayland),
+    };
+    ensure!(
+        !driver.contains(','),
+        "select a single SDL_VIDEODRIVER; console access cannot be a fallback"
+    );
+    Ok(if driver.eq_ignore_ascii_case("kmsdrm") {
+        "KMSDRM".into()
+    } else {
+        driver.to_owned()
+    })
+}
+
 pub fn key(key: Keycode) -> Option<Key> {
     match key {
         Keycode::Left => Some(Key::Left),
@@ -34,9 +58,27 @@ pub fn key(key: Keycode) -> Option<Key> {
         Keycode::Down => Some(Key::Down),
         Keycode::Z => Some(Key::Native),
         Keycode::X => Some(Key::Fit),
-        Keycode::Escape => Some(Key::Quit),
+        Keycode::Escape | Keycode::Q => Some(Key::Quit),
         _ => None,
     }
+}
+
+pub fn key_press(code: Keycode, modifiers: Mod) -> Option<Key> {
+    if code == Keycode::C && modifiers.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) {
+        Some(Key::Quit)
+    } else {
+        key(code)
+    }
+}
+
+fn shutdown_signals() -> Result<StopSignals> {
+    let signals =
+        StopSignals::install(&[signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM])?;
+    ensure!(
+        sdl2::hint::set_with_priority("SDL_NO_SIGNAL_HANDLERS", "1", &sdl2::hint::Hint::Override),
+        "cannot configure orderly shutdown signals"
+    );
+    Ok(signals)
 }
 
 fn label(path: &std::path::Path) -> String {
@@ -93,15 +135,32 @@ pub fn title(
 
 pub fn run(paths: Vec<PathBuf>) -> Result<()> {
     ensure!(!paths.is_empty(), "cannot view an empty playlist");
-    if std::env::var_os("SDL_VIDEODRIVER").is_none() {
-        let driver = video_driver(
-            std::env::var_os("DISPLAY").as_deref(),
-            std::env::var_os("WAYLAND_DISPLAY").as_deref(),
-        );
-        ensure!(
-            sdl2::hint::set("SDL_VIDEODRIVER", driver),
-            "cannot select SDL video driver {driver}"
-        );
+    let shutdown = shutdown_signals()?;
+    let driver = selected_driver(
+        std::env::var_os("SDL_VIDEODRIVER").as_deref(),
+        std::env::var_os("DISPLAY").as_deref(),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+    )?;
+    ensure!(
+        sdl2::hint::set_with_priority("SDL_VIDEODRIVER", &driver, &sdl2::hint::Hint::Override),
+        "cannot select SDL video driver {driver}"
+    );
+    let mut console = Console::open(&driver)?;
+    // All SDL objects must be destroyed before the guard can release a pending VT switch.
+    let result = run_sdl(paths, console.as_mut(), &shutdown);
+    match console {
+        Some(console) => console.finish(result),
+        None => result,
+    }
+}
+
+fn run_sdl(
+    paths: Vec<PathBuf>,
+    mut console: Option<&mut Console>,
+    shutdown: &StopSignals,
+) -> Result<()> {
+    if shutdown.stopping() || console.as_ref().is_some_and(|console| console.stopping()) {
+        return Ok(());
     }
     let sdl = sdl2::init().map_err(|error| anyhow!("initializing SDL2: {error}"))?;
     let video = sdl.video().map_err(|error| anyhow!("opening native video output: {error}; X11 needs DISPLAY, console mode needs a KMSDRM-capable SDL2 and device access"))?;
@@ -171,6 +230,9 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
         paths.len()
     );
     while !quitting {
+        if shutdown.stopping() || console.as_ref().is_some_and(|console| console.stopping()) {
+            break;
+        }
         while let Ok((completed, result)) = result_rx.try_recv() {
             if completed != generation {
                 continue;
@@ -201,13 +263,19 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
             batch.push(event);
         }
         batch.extend(events.poll_iter());
+        let mut pressed_keys = if let Some(console) = console.as_mut() {
+            console.keys()?
+        } else {
+            Vec::new()
+        };
         for event in batch {
             let pressed = match event {
                 Event::Quit { .. } => Some(Key::Quit),
                 Event::KeyDown {
                     keycode: Some(code),
+                    keymod,
                     ..
-                } => key(code),
+                } if console.is_none() => key_press(code, keymod),
                 Event::Window {
                     win_event: WindowEvent::Resized(..) | WindowEvent::SizeChanged(..),
                     ..
@@ -236,9 +304,11 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
                 }
                 _ => None,
             };
-            let Some(pressed) = pressed else {
-                continue;
-            };
+            if let Some(pressed) = pressed {
+                pressed_keys.push(pressed);
+            }
+        }
+        for pressed in pressed_keys {
             let effect = if let Some(loaded) = &image {
                 view.handle(pressed, &loaded.info, loaded.size(), size)
             } else {
@@ -291,6 +361,9 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
         if quitting {
             break;
         }
+        if shutdown.stopping() || console.as_ref().is_some_and(|console| console.stopping()) {
+            break;
+        }
         if hud_visible && Instant::now() >= hud_until && image.is_some() {
             hud_visible = false;
             present = true;
@@ -313,9 +386,9 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
             shown.clone_from(&base);
             if hud_visible {
                 let controls = if view.mode == Mode::Native || pending_native {
-                    "1:1: arrows pan | X fit | ESC exit"
+                    "1:1: arrows pan | X fit | ESC/Q/Ctrl+C exit"
                 } else {
-                    "Arrows: previous/next, brighter/darker | Z 1:1 | ESC exit"
+                    "Arrows: previous/next, brighter/darker | Z 1:1 | ESC/Q/Ctrl+C exit"
                 };
                 view::draw_hud(&mut shown, size, &[&caption, controls]);
             }
@@ -336,4 +409,44 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
         "one or more images could not be decoded; see diagnostics above"
     );
     Ok(())
+}
+
+#[cfg(all(test, target_os = "freebsd"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Run by make test-display on its own Xvfb and PTY; never on a physical console"]
+    fn console_input_pipeline() {
+        let image = std::env::var_os("DNG_VIEWER_TEST_IMAGE").expect("isolated image fixture");
+        assert_eq!(std::env::var("SDL_VIDEODRIVER").unwrap(), "x11");
+        let shutdown = shutdown_signals().unwrap();
+        let (mut console, before) = Console::test_pty().unwrap();
+        let result = run_sdl(vec![image.into()], Some(&mut console), &shutdown);
+        console.finish(result).unwrap();
+        let mut after = unsafe { std::mem::zeroed::<libc::termios>() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut after) },
+            0
+        );
+        assert_eq!(after.c_cc, before.c_cc);
+        assert_eq!(
+            (
+                after.c_iflag,
+                after.c_oflag,
+                after.c_cflag,
+                after.c_lflag,
+                after.c_ispeed,
+                after.c_ospeed
+            ),
+            (
+                before.c_iflag,
+                before.c_oflag,
+                before.c_cflag,
+                before.c_lflag,
+                before.c_ispeed,
+                before.c_ospeed
+            )
+        );
+    }
 }

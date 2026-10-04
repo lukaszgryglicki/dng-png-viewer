@@ -23,15 +23,37 @@ sudo apt install build-essential pkg-config libsdl2-dev
 make                  # tests and stripped release build
 make release          # target/release/dng-png-viewer
 make debug            # target/debug/dng-png-viewer
+make static           # target/static/release/dng-png-viewer (embeds SDL2)
 make test
 make lint             # formatting and strict Clippy
 ```
 
 Build/test parallelism defaults to four jobs/threads; override with `JOBS=...`
 and `TEST_THREADS=...`. Runtime pixel processing uses available CPU threads;
-`RAYON_NUM_THREADS=4` can bound it. The executable links the system SDL2 runtime;
-it is not advertised as a dependency-free static binary. `make clean` removes
-Cargo build artifacts.
+`RAYON_NUM_THREADS=4` can bound it. `make clean` removes Cargo build artifacts.
+
+**`make static` embeds SDL2**, building its packaged source with CMake and
+statically linking it along with the Rust code. It additionally requires CMake
+and the graphics development dependencies (X11 and DRM/GBM/EGL for console
+support). The usual SDL2 development package supplies the relevant dependency
+set on Debian/Ubuntu; FreeBSD graphics development headers accompany the
+installed graphics packages. Install CMake with `pkg install cmake` or
+`apt install cmake` if it is missing.
+
+This is an **SDL2-static build, not a fully static ELF**: native OS/graphics
+libraries and GPU drivers still remain dynamic. It needs no SDL2 runtime
+package. The target checks that the executable has no shared SDL2 dependency
+and lists its other dependencies in `target/static/runtime-libraries.txt`.
+A fully static graphics stack is not supplied: the installed EGL/GBM/DRM
+libraries do not provide static archives, and removing those backends would
+break the required console support. The normal release/debug builds continue
+using the system SDL2.
+
+The bundled build disables unused HIDAPI/game-controller/haptic support to avoid
+an upstream SDL2 incompatibility with FreeBSD's USB headers. Keyboard input,
+X11 and KMSDRM remain enabled; the native driver regression checks both display
+backends. This configuration lives in `.cargo/sdl2.cmake` and also applies when
+building directly with Cargo's `static-sdl2` feature.
 
 ## Run
 
@@ -51,15 +73,21 @@ exit status nonzero, even if subsequent images load successfully.
 
 | Key | Fit-to-screen mode (default) | Native 1:1 mode |
 | --- | --- | --- |
-| Left / Right | Previous / next image, stopping at the ends | Move the image left / right |
-| Up / Down | Brighter / darker DR window; no action for ordinary images | Move the image up / down |
+| Left / Right | Previous / next image, stopping at the ends | Pan toward the left / right of the image |
+| Up / Down | Brighter / darker DR window; no action for ordinary images | Pan toward the top / bottom of the image |
 | Z | Center at one source pixel per display pixel | Recenter at 1:1 |
 | X | Recenter and fit to screen | Return to fit-to-screen |
-| Escape | Exit | Exit |
+| Escape / Q / Ctrl+C | Exit with cleanup | Exit with cleanup |
 
-Panning moves the image by 64 pixels per keypress (including key repeat) and stops
-at its edges. Smaller images stay centered. Z/X preserve the selected DR window;
-loading another image resets it to that image's middle window. Native 1:1 uses
+`Q` works with or without Shift. Ctrl+C is handled both as a focused-window
+shortcut and as SIGINT from the launching terminal; SIGTERM also exits cleanly.
+These all use the same cleanup path, not immediate process termination.
+
+Panning moves the viewing area by 64 pixels in the arrow's direction per
+keypress (including key repeat); the image itself moves in the opposite
+direction. Panning stops at image edges, and smaller images stay centered.
+Z/X preserve the selected DR window; loading another image resets it to that
+image's full-range window, without extra highlight clipping. Native 1:1 uses
 integer pixel alignment, including odd image/display dimensions. Fit mode
 preserves aspect ratio with bilinear scaling and black borders.
 
@@ -88,12 +116,14 @@ The shift range is `0 .. max(code_bits - 8, 0)`, inclusive:
 | Stored depth | Available labeled windows | Initial window |
 | --- | --- | --- |
 | 8 bits or less in a Gray16 file | 0-8 | 0-8 |
-| 12 bits | 0-8, 1-9, 2-10, 3-11, 4-12 | 2-10 |
-| 16 bits | 0-8 through 8-16 | 4-12 |
+| 12 bits | 0-8, 1-9, 2-10, 3-11, 4-12 | 4-12 |
+| 16 bits | 0-8 through 8-16 | 8-16 |
 
-The middle shift is rounded down when necessary. **Up brightens** by selecting
-one lower shift; **down darkens** by selecting one higher shift. These are
-one-bit exposure steps, not bit masks that cycle gray levels.
+The highest (darkest) window is initially selected so every stored sample fits
+without extra highlight clipping. The brighter windows still deliberately clip
+highlights; their mapping is unchanged. **Up brightens** by selecting one lower
+shift; **down darkens** by selecting one higher shift. These are one-bit exposure
+steps, not bit masks that cycle gray levels.
 
 A stretched PNG from `dng-monochrome` normally occupies all 16 code bits, even
 when the original DNG had fewer meaningful camera stops. The PNG does not retain
@@ -156,6 +186,8 @@ accurate sample statistics, so large collections still take time to inspect.
 With `DISPLAY` set, the viewer selects SDL's X11 backend. With only
 `WAYLAND_DISPLAY`, it selects Wayland. Without either, it selects **KMSDRM**.
 An explicit `SDL_VIDEODRIVER` overrides automatic selection.
+Select one driver only; comma-separated fallback lists are rejected so a failed
+desktop connection cannot unexpectedly take over a physical console.
 
 ```sh
 # From a terminal in XFCE/Xorg
@@ -172,23 +204,59 @@ terminal or terminal emulator is not itself a physical KMS console. Use your
 system's normal active-console/session device permissions; do not make device
 nodes world-writable or run the viewer as root to bypass them.
 
-The installed FreeBSD SDL2 used for development includes X11, KMSDRM and FreeBSD
-keyboard support. Physical-console availability is hardware/session dependent;
-an unavailable backend produces an explicit error rather than silently using
-an invisible dummy display. The viewer does not change your desktop settings,
-SDL installation or player configuration.
+### FreeBSD console ownership and recovery
+
+The viewer manages its own FreeBSD VT lifecycle rather than relying on SDL2's
+unimplemented FreeBSD VT-switch callbacks. Before initializing video, it verifies
+that its controlling terminal is the **active, foreground, ordinary text VT**.
+An SSH/tmux/terminal-emulator PTY, an inactive VT, an existing graphics VT, or a
+console owned by another application is rejected without opening graphics
+devices. Run the viewer directly from a local text-console shell, not from tmux.
+Tmux remains appropriate for the AI/build sessions supervising it.
+
+It preserves terminal/keyboard/video modes and claims process-controlled VT
+switching before creating SDL resources. The physical console keyboard stays
+attached to the kernel; the viewer reads arrow/Z/X/Escape sequences directly.
+This also works with an SDL2 build that has graphics but no evdev keyboard input.
+Escape has a short (50 ms) disambiguation delay so an arrow's escape sequence
+does not accidentally exit.
+
+**Switching VTs exits the FreeBSD console viewer** instead of leaving it alive
+with graphics ownership. Escape, Q, Ctrl+C, Ctrl+Z, hangup and termination signals
+also take the cleanup path: SDL releases its graphics resources first, then
+terminal/keyboard/video modes are restored, and only then is the pending VT
+switch permitted. Startup errors and Rust unwinding restore modes too. X11/XFCE
+behavior is unchanged.
+
+No userspace program can guarantee cleanup after `kill -KILL`, a kernel/driver
+hang or power loss. If necessary, use `kill -TERM <viewer-pid>` from another
+terminal rather than SIGKILL. Do not restart Xorg while unsaved GUI work remains.
+
+Physical-console availability is still hardware/session dependent. Lifecycle,
+failure rollback, signal handling and PTY rejection are covered by isolated
+tests; the real physical KMS display was deliberately **not retested on the
+active workstation** after the reported disruption. An unavailable backend
+produces an explicit error rather than an invisible dummy display. The viewer
+does not change desktop configuration, SDL installation or player settings.
 
 ## Tests
 
 `make test` exercises actual codecs, full 16-bit values and all windows, exact
 1:1 pixels, resampling/alpha order, navigation/panning, orientation, CLI aliases,
 directory ordering/deduplication/symlinks and headless analysis.
+On FreeBSD it also checks console preflight, VT ownership/cleanup ordering,
+startup races/failures, panic unwinding, termination signals and console keys
+without accessing the physical console.
 
 `make test-display` additionally needs Python 3, Xvfb, Xlib and XTest. It uses its
 own isolated X server and synthetic fixtures, sends real keyboard events and
 checks native framebuffer pixels and window geometry. It does not touch your
 desktop or take over a physical VT. No image fixtures are kept in your photo
 directories.
+On FreeBSD, a real PTY also drives the console-input path against that isolated
+display: arrow sequences, Z/X, Escape, SIGTERM and simulated VT-release signals
+are exercised, and terminal-attribute restoration is checked. The test-only
+entry point refuses physical consoles and is not included in the normal viewer.
 
 ## License
 

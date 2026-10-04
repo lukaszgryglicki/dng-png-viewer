@@ -1,0 +1,2 @@
+[env]
+SDL2_TOOLCHAIN = { value = ".cargo/sdl2.cmake", relative = true }

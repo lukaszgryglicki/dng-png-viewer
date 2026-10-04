@@ -5,16 +5,19 @@ import array
 import contextlib
 import ctypes as c
 import ctypes.util
+import fcntl
 import hashlib
-import math
+import json
 import os
 from pathlib import Path
 import select
 import shutil
+import signal
 import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import zlib
 
@@ -159,6 +162,16 @@ class Display:
         finally:
             self.x.XDestroyImage(pointer)
 
+    def chord(self, window, names):
+        self.x.XSetInputFocus(self.display, window, 2, 0)
+        codes = [self.x.XKeysymToKeycode(self.display, self.x.XStringToKeysym(name.encode())) for name in names]
+        assert all(codes)
+        for code in codes:
+            assert self.xt.XTestFakeKeyEvent(self.display, code, 1, 0)
+        for code in reversed(codes):
+            assert self.xt.XTestFakeKeyEvent(self.display, code, 0, 0)
+        self.x.XSync(self.display, 0)
+
 
 @contextlib.contextmanager
 def server(root):
@@ -260,7 +273,101 @@ def fingerprint(path):
     return hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
 
 
-def exercise(binary, root, display, display_name):
+def attach_pty():
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
+def reject_unsafe_console(binary, image):
+    if not sys.platform.startswith("freebsd"):
+        return
+    environment = os.environ.copy()
+    environment.update(SDL_VIDEODRIVER="KMSDRM", DISPLAY="", WAYLAND_DISPLAY="", PATH="")
+    result = subprocess.run([str(binary), str(image)], env=environment,
+                            start_new_session=True, capture_output=True, timeout=5)
+    assert result.returncode != 0
+    assert b"active physical console" in result.stderr
+    assert b"Native SDL2" not in result.stderr
+
+    master, slave = os.openpty()
+
+    try:
+        result = subprocess.run([str(binary), str(image)], env=environment,
+                                stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                preexec_fn=attach_pty, timeout=5)
+        assert result.returncode != 0
+        assert b"physical FreeBSD VT" in result.stderr
+        assert b"Native SDL2" not in result.stderr
+    finally:
+        os.close(slave)
+        os.close(master)
+    print("PASS: FreeBSD KMS rejects missing/PTY consoles before SDL initialization", flush=True)
+
+
+def console_input_pipeline(test_binary, image, root, display, display_name):
+    if not sys.platform.startswith("freebsd") or test_binary is None:
+        return
+    environment = os.environ.copy()
+    environment.update(SDL_VIDEODRIVER="x11", DISPLAY=display_name, PATH="",
+                       RAYON_NUM_THREADS="4", LIBGL_ALWAYS_SOFTWARE="1", LP_NUM_THREADS="4",
+                       DNG_VIEWER_TEST_IMAGE=str(image))
+    for exit_method in ("Escape", "q", "Q", "Ctrl+C", signal.SIGINT, signal.SIGTERM, signal.SIGUSR1):
+        master, slave = os.openpty()
+        log_path = root / "console-input.log"
+        process = None
+        try:
+            with log_path.open("wb") as log:
+                process = subprocess.Popen(
+                    [str(test_binary), "--exact", "backend::tests::console_input_pipeline",
+                     "--ignored", "--nocapture"], env=environment, stdin=slave,
+                    stdout=log, stderr=log, preexec_fn=attach_pty,
+                )
+                window = loaded_window(display, process, "FIT | Gray16 256x256 | 16 code bits | window 8-16")
+                if exit_method == "Escape":
+                    os.write(master, b"\x1b")
+                    time.sleep(0.01)
+                    os.write(master, b"[AZ")
+                    wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 7-15")
+                    frame_matches(display, window, gray_region(7))
+                    os.write(master, b"X\x1b[Bz")
+                    wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 8-16")
+                    frame_matches(display, window, gray_region(8))
+                    os.write(master, b"\x1b")
+                elif exit_method in ("q", "Q", "Ctrl+C"):
+                    os.write(master, b"\x03" if exit_method == "Ctrl+C" else exit_method.encode())
+                else:
+                    process.send_signal(exit_method)
+                assert process.wait(timeout=5) == 0, log_path.read_text()
+        except BaseException:
+            if process:
+                stop(process)
+            print(log_path.read_text(errors="replace"), file=sys.stderr)
+            raise
+        finally:
+            if process:
+                stop(process)
+            os.close(slave)
+            os.close(master)
+    print("PASS: real PTY arrows/Z/X drive native pixels; Escape/Q/Ctrl+C/INT/TERM/VT-release restore input", flush=True)
+
+
+def clean_exits(binary, image, root, display, display_name, expected):
+    for exit_method in ("q", "Q", "Ctrl+C", signal.SIGINT, signal.SIGTERM):
+        with viewer(binary, [image], root, display_name, "clean-exit.log") as process:
+            window = loaded_window(display, process, expected)
+            if exit_method == "Ctrl+C":
+                display.chord(window, ["Control_L", "c"])
+            elif exit_method == "Q":
+                display.chord(window, ["Shift_L", "q"])
+            elif exit_method == "q":
+                display.keys(window, ["q"])
+            else:
+                process.send_signal(exit_method)
+            assert process.wait(timeout=3) == 0, f"Unclean exit: {exit_method}"
+    print(f"PASS: Q/Ctrl+C keyboard shortcuts and INT/TERM signals cleanly exit from {expected}", flush=True)
+
+
+def exercise(binary, test_binary, root, display, display_name):
     gray = root / "all-codes.png"
     gray.write_bytes(png_bytes(256, 256, 16, 0,
                               (struct.pack(">256H", *range(y * 256, (y + 1) * 256)) for y in range(256))))
@@ -277,13 +384,16 @@ def exercise(binary, root, display, display_name):
     one_pixel = png_bytes(1, 1, 8, 2, [bytes([19, 57, 121])])
     recovery.write_bytes(one_pixel)
     originals = {path: fingerprint(path) for path in (gray, normal, large, broken, recovery)}
+    reject_unsafe_console(binary, gray)
+    console_input_pipeline(test_binary, gray, root, display, display_name)
+    clean_exits(binary, gray, root, display, display_name, "FIT | Gray16")
 
     with viewer(binary, [gray, normal, large, broken, recovery], root, display_name, "viewer.log") as process:
-        window = loaded_window(display, process, "FIT | Gray16 256x256 | 16 code bits | window 4-12")
+        window = loaded_window(display, process, "FIT | Gray16 256x256 | 16 code bits | window 8-16")
         assert display.geometry(window) == (0, 0, WIDTH, HEIGHT)
         display.keys(window, ["Left"])
         wait_title(display, window, "| 1/5 |")
-        shift = 4
+        shift = 8
         display.keys(window, ["z"])
         wait_title(display, window, "| 1:1 |")
         frame_matches(display, window, gray_region(shift))
@@ -312,15 +422,15 @@ def exercise(binary, root, display, display_name):
         print("PASS: ordinary RGBA fallback, exact alpha composition and disabled DR actions", flush=True)
 
         display.keys(window, ["x", "Right"])
-        wait_title(display, window, "FIT | Gray16 1300x1000")
-        display.keys(window, ["Down"] * 4 + ["z"])
+        wait_title(display, window, "FIT | Gray16 1300x1000 | 16 code bits | window 8-16")
+        display.keys(window, ["z"])
         wait_title(display, window, "1:1 | Gray16 1300x1000 | 16 code bits | window 8-16")
         frame_matches(display, window, large_probes(-138, -116))
         for keys, origin in [
-            (["Left"], (-202, -116)), (["Up"], (-202, -180)),
-            (["Right"], (-138, -180)), (["Down"], (-138, -116)),
-            (["Left"] * 20 + ["Up"] * 20, (-276, -232)),
-            (["Right"] * 20 + ["Down"] * 20, (0, 0)),
+            (["Left"], (-74, -116)), (["Up"], (-74, -52)),
+            (["Right"], (-138, -52)), (["Down"], (-138, -116)),
+            (["Left"] * 20 + ["Up"] * 20, (0, 0)),
+            (["Right"] * 20 + ["Down"] * 20, (-276, -232)),
             (["z"], (-138, -116)),
         ]:
             display.keys(window, keys)
@@ -338,10 +448,12 @@ def exercise(binary, root, display, display_name):
         display.keys(window, ["Right"])
         wait_title(display, window, "| 5/5 |")
         frame_matches(display, window, [(WIDTH // 2, HEIGHT // 2, 0x133979)])
+        frame_matches(display, window, [(WIDTH // 2, 2, 0x061328)])
+        frame_matches(display, window, [(WIDTH // 2, 2, 0x133979)])
         display.keys(window, ["Escape"])
         assert process.wait(timeout=5) == 1, "Decode failures must produce a nonzero final exit"
         assert "Cannot load image" in (root / "viewer.log").read_text()
-        print("PASS: visible decode error, recovery, last-image boundary and Escape", flush=True)
+        print("PASS: visible decode error, recovery, HUD expiry, last-image boundary and Escape", flush=True)
 
     for path, before in originals.items():
         assert fingerprint(path) == before, f"Input changed: {path}"
@@ -373,18 +485,29 @@ def exercise(binary, root, display, display_name):
         assert process.wait(timeout=3) == 0
         assert time.monotonic() - start < 3
     print("PASS: Escape remains responsive during a 64-MiB image decode; PATH was empty throughout", flush=True)
+    clean_exits(binary, slow, root, display, display_name, "Loading...")
+    # SDL can replace its startup window while creating the renderer.
     unexpected_errors = [error for error in display.errors if error[0] != 3]
     assert not unexpected_errors, f"Unexpected X11 errors: {unexpected_errors}"
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: python3 tests/display.py /path/to/dng-png-viewer")
+    if len(sys.argv) not in (2, 3):
+        raise SystemExit("Usage: python3 tests/display.py /path/to/dng-png-viewer [cargo-test-artifacts.jsonl]")
     binary = Path(sys.argv[1]).resolve(strict=True)
+    test_binary = None
+    if len(sys.argv) == 3:
+        records = [json.loads(line) for line in Path(sys.argv[2]).read_text().splitlines()]
+        matches = [record["executable"] for record in records
+                   if record.get("reason") == "compiler-artifact"
+                   and record.get("target", {}).get("name") == "dng_png_viewer"
+                   and record.get("profile", {}).get("test") and record.get("executable")]
+        assert len(matches) == 1, "Expected exactly one viewer library test executable"
+        test_binary = Path(matches[0]).resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="dng-png-viewer-test-") as temporary:
         root = Path(temporary)
         with server(root) as (display, display_name):
-            exercise(binary, root, display, display_name)
+            exercise(binary, test_binary, root, display, display_name)
     print("All native display checks passed; isolated server/processes/fixtures removed.", flush=True)
 
 

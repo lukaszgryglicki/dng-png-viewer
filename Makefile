@@ -14,11 +14,23 @@ release:
 debug:
 	$(CARGO) build --locked -j $(JOBS)
 
+static:
+	CARGO_TARGET_DIR=target/static CMAKE_BUILD_PARALLEL_LEVEL=$(JOBS) \
+		$(CARGO) build --locked --release --features static-sdl2 -j $(JOBS)
+	@set -e; \
+	binary=target/static/release/dng-png-viewer; \
+	ldd "$$binary" > target/static/runtime-libraries.txt; \
+	if grep -q libSDL2 target/static/runtime-libraries.txt; then \
+		echo "SDL2 was not linked statically" >&2; exit 1; \
+	fi; \
+	printf 'SDL2-static executable: %s\nOS graphics libraries/CRT remain dynamic; no SDL2 runtime package is required.\n' "$$binary"
+
 test:
 	RUST_TEST_THREADS=$(TEST_THREADS) $(CARGO) test --locked -j $(JOBS)
 
 test-display: release
-	$(PYTHON) tests/display.py target/release/dng-png-viewer
+	$(CARGO) test --locked --release --lib --no-run -j $(JOBS) --message-format=json > target/display-test-binaries.jsonl
+	$(PYTHON) tests/display.py target/release/dng-png-viewer target/display-test-binaries.jsonl
 
 fmt:
 	$(CARGO) fmt --all
@@ -30,4 +42,4 @@ lint:
 clean:
 	$(CARGO) clean
 
-.PHONY: all build release debug test test-display fmt lint clean
+.PHONY: all build release debug static test test-display fmt lint clean

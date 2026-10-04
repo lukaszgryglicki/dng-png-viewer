@@ -42,7 +42,7 @@ fn renderer_preserves_all_codes_for_every_native_window() {
 fn default_window_and_fit_keys_follow_the_specification() {
     let image = gray(2, 1, vec![0, 4095]);
     let mut view = View::new(&image.info);
-    assert_eq!((view.mode, view.shift), (Mode::Fit, 2));
+    assert_eq!((view.mode, view.shift), (Mode::Fit, 4));
     for (key, effect) in [
         (Key::Left, Effect::Previous),
         (Key::Right, Effect::Next),
@@ -72,17 +72,17 @@ fn default_window_and_fit_keys_follow_the_specification() {
 }
 
 #[test]
-fn native_arrows_move_the_image_and_x_restores_fit_and_preserves_window() {
+fn native_arrows_pan_toward_the_requested_edge_and_x_preserves_window() {
     let image = gray(1000, 800, vec![4095; 800000]);
     let viewport = size(200, 100);
     let mut view = View::new(&image.info);
     view.handle(Key::Up, &image.info, image.size(), viewport);
     view.handle(Key::Native, &image.info, image.size(), viewport);
-    assert_eq!((view.mode, view.shift), (Mode::Native, 1));
+    assert_eq!((view.mode, view.shift), (Mode::Native, 3));
     for (key, expected) in [
-        (Key::Left, (-64, 0)),
-        (Key::Up, (-64, -64)),
-        (Key::Right, (0, -64)),
+        (Key::Left, (64, 0)),
+        (Key::Up, (64, 64)),
+        (Key::Right, (0, 64)),
         (Key::Down, (0, 0)),
     ] {
         assert_eq!(
@@ -90,7 +90,7 @@ fn native_arrows_move_the_image_and_x_restores_fit_and_preserves_window() {
             Effect::Redraw
         );
         assert_eq!((view.pan_x, view.pan_y), expected);
-        assert_eq!(view.shift, 1);
+        assert_eq!(view.shift, 3);
     }
     view.handle(Key::Right, &image.info, image.size(), viewport);
     view.handle(Key::Native, &image.info, image.size(), viewport);
@@ -99,7 +99,7 @@ fn native_arrows_move_the_image_and_x_restores_fit_and_preserves_window() {
     view.handle(Key::Fit, &image.info, image.size(), viewport);
     assert_eq!(
         (view.mode, view.shift, view.pan_x, view.pan_y),
-        (Mode::Fit, 1, 0, 0)
+        (Mode::Fit, 3, 0, 0)
     );
     assert_eq!(
         view.handle(Key::Right, &image.info, image.size(), viewport),
@@ -129,7 +129,7 @@ fn normal_images_ignore_dr_keys_but_still_zoom_and_pan() {
         view.handle(Key::Up, &image.info, image.size(), size(10, 10)),
         Effect::Redraw
     );
-    assert_eq!(view.pan_y, -64);
+    assert_eq!(view.pan_y, 64);
 }
 
 #[test]
@@ -273,7 +273,7 @@ fn hud_handles_small_viewports_long_unicode_labels_and_both_font_sizes() {
         if viewport.width <= 16 {
             assert!(frame.iter().all(|&value| value == 90));
         } else {
-            assert!(frame.iter().any(|&value| value == 30));
+            assert!(frame.contains(&30));
         }
     }
 }
@@ -288,10 +288,22 @@ fn sdl_keys_and_display_selection_are_explicit() {
         (Keycode::Z, Key::Native),
         (Keycode::X, Key::Fit),
         (Keycode::Escape, Key::Quit),
+        (Keycode::Q, Key::Quit),
     ] {
         assert_eq!(backend::key(code), Some(expected));
     }
     assert_eq!(backend::key(Keycode::Space), None);
+    use sdl2::keyboard::Mod;
+    for modifiers in [Mod::LCTRLMOD, Mod::RCTRLMOD, Mod::LCTRLMOD | Mod::LSHIFTMOD] {
+        assert_eq!(backend::key_press(Keycode::C, modifiers), Some(Key::Quit));
+    }
+    for modifiers in [Mod::NOMOD, Mod::LSHIFTMOD, Mod::LALTMOD] {
+        assert_eq!(backend::key_press(Keycode::C, modifiers), None);
+    }
+    assert_eq!(
+        backend::key_press(Keycode::Q, Mod::LSHIFTMOD),
+        Some(Key::Quit)
+    );
     assert_eq!(
         backend::video_driver(Some(OsStr::new(":1")), Some(OsStr::new("wayland-0"))),
         "x11"
@@ -305,6 +317,35 @@ fn sdl_keys_and_display_selection_are_explicit() {
         backend::video_driver(Some(OsStr::new("")), Some(OsStr::new(""))),
         "KMSDRM"
     );
+    assert_eq!(
+        backend::selected_driver(Some(OsStr::new("")), Some(OsStr::new(":1")), None).unwrap(),
+        "x11"
+    );
+    assert_eq!(
+        backend::selected_driver(Some(OsStr::new("kmsdrm")), Some(OsStr::new(":1")), None).unwrap(),
+        "KMSDRM"
+    );
+    assert_eq!(
+        backend::selected_driver(Some(OsStr::new("dummy")), None, None).unwrap(),
+        "dummy"
+    );
+    assert!(backend::selected_driver(Some(OsStr::new("x11,KMSDRM")), None, None).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(backend::selected_driver(Some(OsStr::from_bytes(b"\xff")), None, None).is_err());
+    }
+}
+
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+#[test]
+fn linked_sdl2_includes_both_desktop_and_console_backends() {
+    let drivers: Vec<_> = sdl2::video::drivers().collect();
+    assert!(drivers.contains(&"x11"), "SDL2 lacks X11: {drivers:?}");
+    assert!(
+        drivers.contains(&"KMSDRM"),
+        "SDL2 lacks KMSDRM: {drivers:?}"
+    );
 }
 
 #[test]
@@ -313,7 +354,7 @@ fn captions_distinguish_loading_normal_native_and_dr_without_control_characters(
     let image = gray(1, 1, vec![65535]);
     let mut view = View::new(&image.info);
     let title = backend::title(0, &paths, Some(&image), &view, "");
-    assert!(title.contains("1/1 | picture .png | FIT | Gray16 1x1 | 16 code bits | window 4-12"));
+    assert!(title.contains("1/1 | picture .png | FIT | Gray16 1x1 | 16 code bits | window 8-16"));
     assert!(!title.contains('\n'));
     view.mode = Mode::Native;
     assert!(backend::title(0, &paths, Some(&image), &view, "").contains("| 1:1 |"));

@@ -170,7 +170,7 @@ impl LoadedImage {
                 sample_span_bits: f64::from(u32::from(maximum) - u32::from(minimum) + 1).log2(),
                 code_bits,
                 max_shift,
-                initial_shift: max_shift / 2,
+                initial_shift: max_shift,
             });
             Ok(Self { image, info })
         } else {

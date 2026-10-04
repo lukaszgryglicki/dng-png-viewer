@@ -2,6 +2,11 @@ use dng_png_viewer::cli::Cli;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "freebsd")]
+    // Before any threads start: never let SDL detach the physical console keyboard.
+    unsafe {
+        std::env::set_var("SDL_INPUT_FREEBSD_KEEP_KBD", "1");
+    }
     let cli = match Cli::try_parse_compat(std::env::args_os()) {
         Ok(cli) => cli,
         Err(error) => {

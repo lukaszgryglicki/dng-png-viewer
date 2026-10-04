@@ -141,10 +141,10 @@ impl View {
                     };
                 }
             }
-            Key::Left => self.pan_x = self.pan_x.saturating_sub(64),
-            Key::Right => self.pan_x = self.pan_x.saturating_add(64),
-            Key::Up => self.pan_y = self.pan_y.saturating_sub(64),
-            Key::Down => self.pan_y = self.pan_y.saturating_add(64),
+            Key::Left => self.pan_x = self.pan_x.saturating_add(64),
+            Key::Right => self.pan_x = self.pan_x.saturating_sub(64),
+            Key::Up => self.pan_y = self.pan_y.saturating_add(64),
+            Key::Down => self.pan_y = self.pan_y.saturating_sub(64),
         }
         self.clamp_pan(Some(image), viewport);
         if *self == before {

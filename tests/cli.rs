@@ -179,7 +179,7 @@ fn analyze_runs_headlessly_without_a_player_or_a_valid_video_driver() {
     assert_eq!(value["image"]["mode"], "dr");
     assert_eq!(value["image"]["maximum"], 4095);
     assert_eq!(value["image"]["max_shift"], 4);
-    assert_eq!(value["image"]["initial_shift"], 2);
+    assert_eq!(value["image"]["initial_shift"], 4);
 }
 
 #[test]

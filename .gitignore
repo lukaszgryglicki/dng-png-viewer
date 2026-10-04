@@ -1,0 +1,6 @@
+/target/
+*.secret
+*.[pP][nN][gG]
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[dD][nN][gG]

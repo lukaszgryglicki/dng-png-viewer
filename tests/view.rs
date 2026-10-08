@@ -24,7 +24,7 @@ fn renderer_preserves_all_codes_for_every_native_window() {
     for shift in 0..=8 {
         let view = View {
             mode: Mode::Native,
-            shift,
+            shift: f64::from(shift),
             ..View::default()
         };
         let frame = view::render(&image, &view, size(256, 256)).unwrap();
@@ -42,7 +42,10 @@ fn renderer_preserves_all_codes_for_every_native_window() {
 fn default_window_and_fit_keys_follow_the_specification() {
     let image = gray(2, 1, vec![0, 4095]);
     let mut view = View::new(&image.info);
-    assert_eq!((view.mode, view.shift), (Mode::Fit, 4));
+    assert_eq!(
+        (view.mode, view.shift, view.brightness_step),
+        (Mode::Fit, 4.0, 0.2)
+    );
     for (key, effect) in [
         (Key::Left, Effect::Previous),
         (Key::Right, Effect::Next),
@@ -56,7 +59,7 @@ fn default_window_and_fit_keys_follow_the_specification() {
     for _ in 0..20 {
         view.handle(Key::Up, &image.info, image.size(), size(100, 100));
     }
-    assert_eq!(view.shift, 0);
+    assert_eq!(view.shift, 0.0);
     assert_eq!(
         view.handle(Key::Up, &image.info, image.size(), size(100, 100)),
         Effect::None
@@ -64,7 +67,7 @@ fn default_window_and_fit_keys_follow_the_specification() {
     for _ in 0..20 {
         view.handle(Key::Down, &image.info, image.size(), size(100, 100));
     }
-    assert_eq!(view.shift, 4);
+    assert_eq!(view.shift, 4.0);
     assert_eq!(
         view.handle(Key::Down, &image.info, image.size(), size(100, 100)),
         Effect::None
@@ -78,7 +81,7 @@ fn native_arrows_pan_toward_the_requested_edge_and_x_preserves_window() {
     let mut view = View::new(&image.info);
     view.handle(Key::Up, &image.info, image.size(), viewport);
     view.handle(Key::Native, &image.info, image.size(), viewport);
-    assert_eq!((view.mode, view.shift), (Mode::Native, 3));
+    assert_eq!((view.mode, view.shift), (Mode::Native, 3.8));
     for (key, expected) in [
         (Key::Left, (64, 0)),
         (Key::Up, (64, 64)),
@@ -90,7 +93,7 @@ fn native_arrows_pan_toward_the_requested_edge_and_x_preserves_window() {
             Effect::Redraw
         );
         assert_eq!((view.pan_x, view.pan_y), expected);
-        assert_eq!(view.shift, 3);
+        assert_eq!(view.shift, 3.8);
     }
     view.handle(Key::Right, &image.info, image.size(), viewport);
     view.handle(Key::Native, &image.info, image.size(), viewport);
@@ -99,7 +102,7 @@ fn native_arrows_pan_toward_the_requested_edge_and_x_preserves_window() {
     view.handle(Key::Fit, &image.info, image.size(), viewport);
     assert_eq!(
         (view.mode, view.shift, view.pan_x, view.pan_y),
-        (Mode::Fit, 3, 0, 0)
+        (Mode::Fit, 3.8, 0, 0)
     );
     assert_eq!(
         view.handle(Key::Right, &image.info, image.size(), viewport),
@@ -122,7 +125,7 @@ fn normal_images_ignore_dr_keys_but_still_zoom_and_pan() {
             view.handle(key, &image.info, image.size(), size(10, 10)),
             Effect::None
         );
-        assert_eq!(view.shift, 0);
+        assert_eq!(view.shift, 0.0);
     }
     view.handle(Key::Native, &image.info, image.size(), size(10, 10));
     assert_eq!(
@@ -247,13 +250,111 @@ fn invalid_viewports_and_window_values_are_errors() {
         view::render(
             &image,
             &View {
-                shift: 9,
+                shift: 9.0,
                 ..View::default()
             },
             size(1, 1)
         )
         .is_err()
     );
+}
+
+#[test]
+fn default_and_quarter_bit_steps_render_exact_samples_and_clamp_at_both_ends() {
+    let image = gray(256, 256, (0..=65535).collect());
+    let viewport = image.size();
+    for (divisions, step) in [(5, 0.2), (4, 0.25)] {
+        let mut view = View {
+            brightness_step: step,
+            ..View::new(&image.info)
+        };
+        for key in [Key::Up, Key::Down] {
+            for tick in 0..=8 * divisions {
+                let tick = if key == Key::Up {
+                    8 * divisions - tick
+                } else {
+                    tick
+                };
+                let shift = f64::from(tick) / f64::from(divisions);
+                assert!((view.shift - shift).abs() < 1e-12, "{step}/{key:?}/{shift}");
+                if tick % divisions == 0 {
+                    assert_eq!(view.shift, shift);
+                }
+                view.handle(Key::Native, &image.info, viewport, viewport);
+                let frame = view::render(&image, &view, viewport).unwrap();
+                for (sample, pixel) in frame.chunks_exact(3).enumerate() {
+                    let expected = (sample as f64 / shift.exp2()).floor().min(255.0) as u8;
+                    assert_eq!(
+                        pixel, &[expected; 3],
+                        "step {step}, sample {sample}, shift {shift}"
+                    );
+                }
+                view.handle(Key::Fit, &image.info, viewport, viewport);
+                view.handle(key, &image.info, viewport, viewport);
+            }
+            assert_eq!(
+                view.handle(key, &image.info, viewport, viewport),
+                Effect::None
+            );
+        }
+    }
+}
+
+#[test]
+fn roundoff_correction_does_not_discard_tiny_configured_steps() {
+    let image = gray(1, 1, vec![65535]);
+    for step in [1e-15, 1e-12] {
+        let mut view = View {
+            brightness_step: step,
+            ..View::new(&image.info)
+        };
+        view.handle(Key::Up, &image.info, image.size(), image.size());
+        assert_eq!(view.shift, 8.0 - step);
+        assert!(view.shift < 8.0);
+        view.shift = 0.0;
+        view.handle(Key::Down, &image.info, image.size(), image.size());
+        assert_eq!(view.shift, step);
+    }
+}
+
+#[test]
+fn configurable_steps_clip_before_interpolation_and_preserve_zoom_behavior() {
+    let image = gray(2, 2, vec![0, 0, 0, 65535]);
+    for step in [0.1, 0.2, 0.25, 0.5, 1.0, 3.0, 8.0] {
+        let mut view = View {
+            brightness_step: step,
+            ..View::new(&image.info)
+        };
+        view.handle(Key::Up, &image.info, image.size(), size(1, 1));
+        assert_eq!(view.shift, (8.0 - step).max(0.0));
+        assert_eq!(view::render(&image, &view, size(1, 1)).unwrap(), [64; 3]);
+        let shift = view.shift;
+        view.handle(Key::Native, &image.info, image.size(), size(1, 1));
+        view.handle(Key::Up, &image.info, image.size(), size(1, 1));
+        view.handle(Key::Fit, &image.info, image.size(), size(1, 1));
+        assert_eq!(view.shift, shift);
+        for _ in 0..100 {
+            view.handle(Key::Up, &image.info, image.size(), size(1, 1));
+        }
+        assert_eq!(view.shift, 0.0);
+        for _ in 0..100 {
+            view.handle(Key::Down, &image.info, image.size(), size(1, 1));
+        }
+        assert_eq!(view.shift, 8.0);
+    }
+    for shift in [-0.25, f64::NAN, f64::INFINITY] {
+        assert!(
+            view::render(
+                &image,
+                &View {
+                    shift,
+                    ..View::default()
+                },
+                size(1, 1)
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]
@@ -356,6 +457,10 @@ fn captions_distinguish_loading_normal_native_and_dr_without_control_characters(
     let title = backend::title(0, &paths, Some(&image), &view, "");
     assert!(title.contains("1/1 | picture .png | FIT | Gray16 1x1 | 16 code bits | window 8-16"));
     assert!(!title.contains('\n'));
+    view.shift = 7.75;
+    assert!(backend::title(0, &paths, Some(&image), &view, "").contains("window 7.75-15.75"));
+    view.shift = 0.1 + 0.2;
+    assert!(backend::title(0, &paths, Some(&image), &view, "").contains("window 0.3-8.3"));
     view.mode = Mode::Native;
     assert!(backend::title(0, &paths, Some(&image), &view, "").contains("| 1:1 |"));
     assert!(backend::title(0, &paths, None, &view, "Loading...").ends_with("Loading..."));

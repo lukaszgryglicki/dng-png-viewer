@@ -254,10 +254,10 @@ def frame_matches(display, window, expected):
     wait_for(ready, "exact native framebuffer pixels")
 
 
-def gray_region(shift):
-    left, top = (WIDTH - 256) // 2, (HEIGHT - 256) // 2
-    return [(left + code % 256, top + code // 256, min(code // (2 ** shift), 255) * 0x010101)
-            for code in range(65536)]
+def gray_region(shift, width=256, height=256):
+    left, top = (WIDTH - width) // 2, (HEIGHT - height) // 2
+    return [(left + code % width, top + code // width, int(min(code / (2 ** shift), 255)) * 0x010101)
+            for code in range(width * height)]
 
 
 def large_sample(x, y):
@@ -327,8 +327,8 @@ def console_input_pipeline(test_binary, image, root, display, display_name):
                     os.write(master, b"\x1b")
                     time.sleep(0.01)
                     os.write(master, b"[AZ")
-                    wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 7-15")
-                    frame_matches(display, window, gray_region(7))
+                    wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 7.8-15.8")
+                    frame_matches(display, window, gray_region(7.8))
                     os.write(master, b"X\x1b[Bz")
                     wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 8-16")
                     frame_matches(display, window, gray_region(8))
@@ -367,6 +367,55 @@ def clean_exits(binary, image, root, display, display_name, expected):
     print(f"PASS: Q/Ctrl+C keyboard shortcuts and INT/TERM signals cleanly exit from {expected}", flush=True)
 
 
+def preserved_windows(binary, root, display, display_name, gray, normal, broken):
+    matching, after_normal, after_error = [root / f"{name}.png"
+                                         for name in ("matching", "after-normal", "after-error")]
+    pixels = gray.read_bytes()
+    for path in (matching, after_normal, after_error):
+        path.write_bytes(pixels)
+    resized = root / "same-range-different-size.png"
+    resized.write_bytes(png_bytes(128, 512, 16, 0,
+                                 (struct.pack(">128H", *range(y * 128, (y + 1) * 128))
+                                  for y in range(512))))
+    narrow = root / "twelve-bit.png"
+    narrow.write_bytes(png_bytes(2, 1, 16, 0, [struct.pack(">2H", 0, 4095)]))
+    paths = [gray, matching, resized, narrow, normal, after_normal, broken, after_error]
+    for preload in (0, 3):
+        with viewer(binary, ["-preload", preload, *paths], root, display_name,
+                    f"preserved-window-{preload}.log") as process:
+            window = loaded_window(display, process, "FIT | Gray16 256x256 | 16 code bits | window 8-16")
+            display.keys(window, ["Up"] * 15)
+            wait_title(display, window, "window 5-13")
+            display.keys(window, ["Right", "Right", "z"])
+            wait_title(display, window, "1:1 | Gray16 128x512 | 16 code bits | window 5-13")
+            frame_matches(display, window, gray_region(5, 128, 512))
+            display.keys(window, ["x"] + ["Up"] * 3 + ["Left", "Left", "z"])
+            wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 4.4-12.4")
+            frame_matches(display, window, gray_region(4.4))
+            display.keys(window, ["x", "Right"])
+            wait_title(display, window, "FIT | Gray16 256x256 | 16 code bits | window 4.4-12.4")
+            display.keys(window, ["Up"] * 12 + ["Right", "Right"])
+            wait_title(display, window, "FIT | Gray16 2x1 | 12 code bits | window 4-12")
+            display.keys(window, ["Up"] * 3 + ["Left"])
+            wait_title(display, window, "FIT | Gray16 128x512 | 16 code bits | window 8-16")
+            display.keys(window, ["Right"])
+            wait_title(display, window, "FIT | Gray16 2x1 | 12 code bits | window 4-12")
+            display.keys(window, ["Up"] * 3 + ["Right"])
+            wait_title(display, window, "FIT | standard 256x256")
+            display.keys(window, ["Left"])
+            wait_title(display, window, "FIT | Gray16 2x1 | 12 code bits | window 4-12")
+            display.keys(window, ["Right", "Right"])
+            wait_title(display, window, "FIT | Gray16 256x256 | 16 code bits | window 8-16")
+            display.keys(window, ["Up"] * 15 + ["Right"])
+            wait_title(display, window, "Cannot load image:")
+            display.keys(window, ["Right"])
+            wait_title(display, window, "FIT | Gray16 256x256 | 16 code bits | window 8-16")
+            display.keys(window, ["Escape"])
+            assert process.wait(timeout=5) == 1
+    print("PASS: DR persists through cached/cold and rapid navigation; different ranges, color and errors reset it",
+          flush=True)
+
+
 def exercise(binary, test_binary, root, display, display_name):
     gray = root / "all-codes.png"
     gray.write_bytes(png_bytes(256, 256, 16, 0,
@@ -397,12 +446,14 @@ def exercise(binary, test_binary, root, display, display_name):
         display.keys(window, ["z"])
         wait_title(display, window, "| 1:1 |")
         frame_matches(display, window, gray_region(shift))
-        for target in range(9):
-            display.keys(window, ["x"] + (["Up"] * (shift - target) if target < shift else ["Down"] * (target - shift)) + ["z"])
-            wait_title(display, window, f"1:1 | Gray16 256x256 | 16 code bits | window {target}-{target + 8}")
+        for fifth in range(41):
+            target = fifth / 5
+            steps = round(abs(shift - target) / 0.2)
+            display.keys(window, ["x"] + (["Up"] if target < shift else ["Down"]) * steps + ["z"])
+            wait_title(display, window, f"1:1 | Gray16 256x256 | 16 code bits | window {target:g}-{target + 8:g}")
             frame_matches(display, window, gray_region(target))
             shift = target
-        print("PASS: fullscreen, first/end navigation, all 65,536 samples in all nine native DR windows", flush=True)
+        print("PASS: fullscreen, first/end navigation, all 65,536 samples in all 41 fifth-bit native DR windows", flush=True)
 
         display.keys(window, ["x", "Right"])
         wait_title(display, window, "FIT | standard 256x256")
@@ -455,6 +506,35 @@ def exercise(binary, test_binary, root, display, display_name):
         assert "Cannot load image" in (root / "viewer.log").read_text()
         print("PASS: visible decode error, recovery, HUD expiry, last-image boundary and Escape", flush=True)
 
+    for preload in (0, 1, 3):
+        with viewer(binary, ["-preload", preload, "-brightness-step", "0.5", gray, normal, recovery],
+                    root, display_name, f"preload-{preload}.log") as process:
+            window = loaded_window(display, process, "window 8-16")
+            display.keys(window, ["Up", "z"])
+            wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 7.5-15.5")
+            frame_matches(display, window, gray_region(7.5))
+            display.keys(window, ["x", "Right", "Right", "z"])
+            wait_title(display, window, "1:1 | standard 1x1")
+            frame_matches(display, window, [((WIDTH - 1) // 2, (HEIGHT - 1) // 2, 0x133979)])
+            display.keys(window, ["x", "Left", "Left"])
+            wait_title(display, window, "FIT | Gray16 256x256 | 16 code bits | window 8-16")
+            display.keys(window, ["Up", "z"])
+            wait_title(display, window, "window 7.5-15.5")
+            frame_matches(display, window, gray_region(7.5))
+            display.keys(window, ["Escape"])
+            assert process.wait(timeout=5) == 0
+    print("PASS: preload 0/1/3, rapid forward/back navigation and configurable half-bit controls", flush=True)
+
+    with viewer(binary, [gray, broken], root, display_name, "unvisited-error.log") as process:
+        window = loaded_window(display, process, "FIT | Gray16")
+        display.keys(window, ["Up", "z"])
+        wait_title(display, window, "window 7.8-15.8")
+        frame_matches(display, window, gray_region(7.8))
+        display.keys(window, ["Escape"])
+        assert process.wait(timeout=5) == 0, "An unvisited preload failure must not fail the current image"
+
+    preserved_windows(binary, root, display, display_name, gray, normal, broken)
+
     for path, before in originals.items():
         assert fingerprint(path) == before, f"Input changed: {path}"
 
@@ -486,6 +566,16 @@ def exercise(binary, test_binary, root, display, display_name):
         assert time.monotonic() - start < 3
     print("PASS: Escape remains responsive during a 64-MiB image decode; PATH was empty throughout", flush=True)
     clean_exits(binary, slow, root, display, display_name, "Loading...")
+    with viewer(binary, [gray, slow], root, display_name, "preloading-exit.log") as process:
+        window = loaded_window(display, process, "FIT | Gray16 256x256")
+        start = time.monotonic()
+        display.keys(window, ["Up", "z"])
+        wait_title(display, window, "window 7.8-15.8")
+        frame_matches(display, window, gray_region(7.8))
+        display.keys(window, ["Escape"])
+        assert process.wait(timeout=3) == 0
+        assert time.monotonic() - start < 3
+    print("PASS: brightness, zoom and Escape remain responsive while a large neighbor preloads", flush=True)
     # SDL can replace its startup window while creating the renderer.
     unexpected_errors = [error for error in display.errors if error[0] != 3]
     assert not unexpected_errors, f"Unexpected X11 errors: {unexpected_errors}"

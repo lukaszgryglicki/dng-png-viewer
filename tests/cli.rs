@@ -20,10 +20,15 @@ fn every_option_accepts_single_and_double_dash_forms() {
             &format!("{prefix}dir=two"),
             &format!("{prefix}shuffle"),
             &format!("{prefix}analyze"),
+            &format!("{prefix}preload"),
+            "5",
+            &format!("{prefix}brightness-step=0.5"),
             "a.png",
         ])
         .unwrap();
         assert!(cli.shuffle && cli.analyze);
+        assert_eq!(cli.preload, 5);
+        assert_eq!(cli.brightness_step, 0.5);
         assert_eq!(
             cli.sources,
             vec![
@@ -46,6 +51,38 @@ fn every_option_accepts_single_and_double_dash_forms() {
         parse(&["-V"]).unwrap_err().kind(),
         ErrorKind::DisplayVersion
     );
+}
+
+#[test]
+fn preload_and_brightness_defaults_and_custom_values() {
+    let cli = parse(&["a.png"]).unwrap();
+    assert_eq!((cli.preload, cli.brightness_step), (3, 0.2));
+    for prefix in ["-", "--"] {
+        for (preload, step) in [
+            (0, 0.1),
+            (1, 0.2),
+            (2, 0.25),
+            (3, 0.5),
+            (10, 1.0),
+            (100, 8.0),
+        ] {
+            let cli = parse(&[
+                "a.png",
+                &format!("{prefix}preload={preload}"),
+                &format!("{prefix}brightness-step"),
+                &step.to_string(),
+            ])
+            .unwrap();
+            assert_eq!((cli.preload, cli.brightness_step), (preload, step));
+        }
+    }
+    let cli = parse(&["--", "-preload", "-brightness-step"]).unwrap();
+    assert_eq!(
+        cli.images,
+        vec![PathBuf::from("-preload"), "-brightness-step".into()]
+    );
+    let cli = parse(&["-dir", "-brightness-step", "a.png"]).unwrap_err();
+    assert_eq!(cli.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]
@@ -96,6 +133,17 @@ fn invalid_options_missing_sources_and_player_options_fail() {
         vec!["--shuffle=true", "a.png"],
         vec!["--mpv", "mpv", "a.png"],
         vec!["--mpv-arg=--vo=gpu", "a.png"],
+        vec!["-preload"],
+        vec!["--preload=-1", "a.png"],
+        vec!["--preload=1.5", "a.png"],
+        vec!["--preload=18446744073709551616", "a.png"],
+        vec!["-brightness-step"],
+        vec!["--brightness-step=0", "a.png"],
+        vec!["--brightness-step=-0.25", "a.png"],
+        vec!["--brightness-step=NaN", "a.png"],
+        vec!["--brightness-step=inf", "a.png"],
+        vec!["--brightness-step=8.1", "a.png"],
+        vec!["--brightness-step=bogus", "a.png"],
     ] {
         assert!(parse(&args).is_err(), "{args:?}");
     }

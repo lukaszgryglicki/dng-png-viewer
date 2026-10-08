@@ -5,20 +5,21 @@ through a movable 8-bit display window**. It runs under Xorg/XFCE or directly on
 a supported KMS/DRM text console. Ordinary images use normal 8-bit color display.
 
 The program decodes images, selects windows, scales/pans, draws and handles keys
-itself. **No mpv, libmpv, FFmpeg, external viewer, helper process or temporary
-rendered image is needed.** SDL2 supplies native window, display and input access.
-Image files are read-only.
+itself. **No external viewer, mpv, FFmpeg executable, helper process or temporary
+rendered image is needed.** SDL2 supplies native window, display and input access;
+DNG and HEIC/HEIF/AVIF decoding also happens in-process. Image files are read-only.
 
 ## Build
 
-Requires Rust 1.89+, a C linker, `pkg-config` and SDL2 development files.
+Requires Rust 1.89+, C/C++ compilers, CMake, `pkg-config`, and SDL2, libde265 and
+libaom development files. The codec tests also need x265 to generate HEIC fixtures.
 
 ```sh
 # FreeBSD
-sudo pkg install sdl2 pkgconf
+sudo pkg install sdl2 pkgconf cmake libde265 aom x265
 
 # Debian/Ubuntu
-sudo apt install build-essential pkg-config libsdl2-dev
+sudo apt install build-essential cmake pkg-config libsdl2-dev libde265-dev libaom-dev libx265-dev
 
 make                  # tests and stripped release build
 make release          # target/release/dng-png-viewer
@@ -32,15 +33,23 @@ Build/test parallelism defaults to four jobs/threads; override with `JOBS=...`
 and `TEST_THREADS=...`. Runtime pixel processing uses available CPU threads;
 `RAYON_NUM_THREADS=4` can bound it. `make clean` removes Cargo build artifacts.
 
+The default `bundled-heif` feature builds the packaged libheif source locally,
+using libde265 for HEVC and libaom (or dav1d when installed) for AV1. Native codec
+libraries remain dynamically linked; no system libheif is replaced. Only HEVC/AV1
+codecs are enabled by `.cargo/heif.cmake`; the existing SDL2-specific toolchain
+remains separate. To use a system libheif >=1.17 instead, install its development
+package and build with `cargo build --locked --release --no-default-features`.
+That library must have suitable HEVC/AV1 decoders: some FFmpeg-backed builds reject
+12-bit grayscale HEIC. Missing codecs or unsupported files produce explicit errors.
+
 **`make static` embeds SDL2**, building its packaged source with CMake and
-statically linking it along with the Rust code. It additionally requires CMake
-and the graphics development dependencies (X11 and DRM/GBM/EGL for console
+statically linking it along with the Rust code. It additionally requires
+the graphics development dependencies (X11 and DRM/GBM/EGL for console
 support). The usual SDL2 development package supplies the relevant dependency
 set on Debian/Ubuntu; FreeBSD graphics development headers accompany the
-installed graphics packages. Install CMake with `pkg install cmake` or
-`apt install cmake` if it is missing.
+installed graphics packages.
 
-This is an **SDL2-static build, not a fully static ELF**: native OS/graphics
+This is an **SDL2-static build, not a fully static ELF**: native codecs, OS/graphics
 libraries and GPU drivers still remain dynamic. It needs no SDL2 runtime
 package. The target checks that the executable has no shared SDL2 dependency
 and lists its other dependencies in `target/static/runtime-libraries.txt`.
@@ -61,6 +70,8 @@ building directly with Cargo's `static-sdl2` feature.
 ./target/release/dng-png-viewer *.png
 ./target/release/dng-png-viewer -dir /photos/dng-mono
 ./target/release/dng-png-viewer first.png -dir /photos/one -dir /photos/two *.jpg -shuffle
+./target/release/dng-png-viewer -preload 3 -brightness-step 0.2 *.DNG
+./target/release/dng-png-viewer -preload 0 -dir /photos
 ./target/release/dng-png-viewer -analyze -dir /photos/dng-mono
 ./target/release/dng-png-viewer -help
 ```
@@ -86,9 +97,11 @@ These all use the same cleanup path, not immediate process termination.
 Panning moves the viewing area by 64 pixels in the arrow's direction per
 keypress (including key repeat); the image itself moves in the opposite
 direction. Panning stops at image edges, and smaller images stay centered.
-Z/X preserve the selected DR window; loading another image resets it to that
-image's full-range window, without extra highlight clipping. Native 1:1 uses
-integer pixel alignment, including odd image/display dimensions. Fit mode
+Z/X preserve the selected DR window. Next/previous navigation also preserves it
+when both images have the same available DR range, even across different formats
+or dimensions. A different range, ordinary image or decode error resets it to the
+next image's default; the first image starts at its full-range window. Native 1:1
+uses integer pixel alignment, including odd image/display dimensions. Fit mode
 preserves aspect ratio with bilinear scaling and black borders.
 
 ## What the DR window means
@@ -111,19 +124,24 @@ black subtraction, histogram stretch, gamma transformation or dithering.
 Windowing happens **before** spatial interpolation, not after converting the
 source to 8 bits.
 
-The shift range is `0 .. max(code_bits - 8, 0)`, inclusive:
+The shift range is `0 .. max(code_bits - 8, 0)`, inclusive, with a default
+step of **0.2 bits**:
 
 | Stored depth | Available labeled windows | Initial window |
 | --- | --- | --- |
 | 8 bits or less in a Gray16 file | 0-8 | 0-8 |
-| 12 bits | 0-8, 1-9, 2-10, 3-11, 4-12 | 4-12 |
-| 16 bits | 0-8 through 8-16 | 8-16 |
+| 12 bits | 0-8, 0.2-8.2, 0.4-8.4, ... through 4-12 | 4-12 |
+| 16 bits | 0-8 through 8-16, including fifth-bit positions | 8-16 |
 
-The highest (darkest) window is initially selected so every stored sample fits
+The highest (darkest) window is the default so every stored sample fits
 without extra highlight clipping. The brighter windows still deliberately clip
-highlights; their mapping is unchanged. **Up brightens** by selecting one lower
-shift; **down darkens** by selecting one higher shift. These are one-bit exposure
-steps, not bit masks that cycle gray levels.
+highlights. **Up brightens** by reducing the shift; **down darkens** by increasing
+it. For example, Up selects `8-16`, `7.8-15.8`, `7.6-15.6`, and so on.
+`-brightness-step 0.25` selects quarter-bit steps; `-brightness-step 0.5` selects
+half-bit steps; `-brightness-step 1` restores the old whole-bit controls.
+Any finite step greater than zero and at most 8 is valid;
+the endpoints are clamped. Fractional shifts are exposure scaling, not fractional
+bit masks. Whole-bit positions produce exactly the same sample values as before.
 
 A stretched PNG from `dng-monochrome` normally occupies all 16 code bits, even
 when the original DNG had fewer meaningful camera stops. The PNG does not retain
@@ -134,15 +152,24 @@ white image has 16 code bits but zero sample-span bits.
 
 ## Ordinary images and metadata
 
-Supported formats: PNG, JPEG, GIF, BMP, TIFF, WebP, ICO, PBM/PGM/PPM/PAM/PNM,
-TGA, QOI, farbfeld (`.ff`), Radiance HDR and OpenEXR. Animated formats display
-their initial image; this is a still-image viewer, not an animation player.
-DNG/other camera raws, AVIF, HEIC and JPEG XL are not supported.
+Supported formats: DNG, PNG, JPEG, HEIC/HEIF (`.heic`, `.heif`, `.hif`), AVIF,
+GIF, BMP, TIFF, WebP, ICO, PBM/PGM/PPM/PAM/PNM, TGA, QOI, farbfeld (`.ff`),
+Radiance HDR and OpenEXR. Animated formats display their initial image;
+HEIF containers display the primary image. This is a still-image viewer,
+not an animation player. Other camera raw formats and JPEG XL are not supported.
 
-Only decoded opaque 16-bit grayscale images enable DR scrolling, including
-compatible Gray16 TIFF/PGM files. Eight-bit grayscale, RGB, RGBA, palette and
-grayscale-with-alpha images use the ordinary display path. Higher-precision
-color images are converted to 8-bit color; they do not enable DR scrolling.
+Integer monochrome DNGs use full-resolution raw samples, not embedded previews.
+The viewer applies the raw crop and orientation but does not subtract the black
+level, stretch to the white level, or apply gamma. Color/CFA DNGs are developed
+to ordinary color; floating-point DNGs also use the ordinary display path.
+
+Only decoded opaque high-bit-depth integer grayscale images enable DR scrolling:
+Gray16 PNG/TIFF/PGM, integer monochrome DNG, and compatible high-bit-depth
+monochrome HEIC/AVIF. Ten- and twelve-bit grayscale HEIF samples retain their
+decoded code values in 16-bit storage, without stretching them to 65535.
+Eight-bit grayscale, RGB, RGBA, palette and grayscale-with-alpha images use the
+ordinary display path. Higher-precision color images, including 10/12-bit HEIC,
+are converted to 8-bit color; they do not enable DR scrolling.
 Alpha is composited over black with premultiplied interpolation. Decoder-provided
 EXIF orientation is applied before layout and statistics.
 
@@ -158,6 +185,8 @@ Both single and double dashes work, including `-dir=/photos` and `--dir /photos`
 | --- | --- |
 | `-dir DIRECTORY` | Recursively add supported image extensions; repeat freely |
 | `-shuffle` | Shuffle the entire merged, deduplicated playlist |
+| `-preload N` | Background-decode up to N images on each side; default 3, 0 disables preloading |
+| `-brightness-step BITS` | DR adjustment per Up/Down keypress; default 0.2, valid range greater than 0 through 8 |
 | `-analyze` | Print one JSON object per image without opening a display |
 | `-help`, `-h` | Help and controls |
 | `-version`, `-V` | Program version |
@@ -171,6 +200,20 @@ errors and broken image symlinks are reported, not silently skipped. Explicit
 filenames can omit an extension when the codec recognizes their contents.
 Native non-UTF-8 paths remain usable; displayed/JSON names use replacement
 characters for undecodable bytes.
+
+Preloading keeps decoded pixels in a rolling cache of at most `2*N + 1` images,
+bounded by the playlist ends. Moving right schedules the new rightmost neighbor
+and drops images outside the new range; moving left works symmetrically.
+The current image has its own loader, while a separate background worker loads
+nearby images first using an independent single-thread pixel pool. Display/input
+does not wait for preloads. Cached images can be selected immediately; cold
+startup or navigation faster than decoding can still show a loading message.
+Preload errors are shown only if that image is selected.
+
+The cache costs decoded-image memory, not compressed-file size: a 60-megapixel
+Gray16 image uses about 120 MB, so seven such images use about 840 MB, plus
+in-flight decoding and rendering buffers. Use a smaller radius or `-preload 0`
+on memory-constrained machines. Preloading is not used by `-analyze`.
 
 If a shell glob would exceed the operating system's argument limit, **replace
 the glob with `-dir`**. A program cannot fix `Argument list too long` after the
@@ -241,16 +284,20 @@ does not change desktop configuration, SDL installation or player settings.
 
 ## Tests
 
-`make test` exercises actual codecs, full 16-bit values and all windows, exact
-1:1 pixels, resampling/alpha order, navigation/panning, orientation, CLI aliases,
-directory ordering/deduplication/symlinks and headless analysis.
+`make test` exercises actual codecs (including synthetic DNG and 8/10/12-bit
+HEIC/AVIF fixtures), full 16-bit values and fractional windows, exact 1:1 pixels,
+resampling/alpha order, navigation/panning, orientation, CLI aliases,
+directory ordering/deduplication/symlinks and headless analysis. Worker tests
+cover the sliding preload cache, eviction, radius zero, rapid navigation,
+deferred errors and responsive foreground loading/shutdown.
 On FreeBSD it also checks console preflight, VT ownership/cleanup ordering,
 startup races/failures, panic unwinding, termination signals and console keys
 without accessing the physical console.
 
 `make test-display` additionally needs Python 3, Xvfb, Xlib and XTest. It uses its
 own isolated X server and synthetic fixtures, sends real keyboard events and
-checks native framebuffer pixels and window geometry. It does not touch your
+checks native framebuffer pixels, window geometry and DR preservation/reset
+through cached and cold navigation. It does not touch your
 desktop or take over a physical VT. No image fixtures are kept in your photo
 directories.
 On FreeBSD, a real PTY also drives the console-input path against that isolated

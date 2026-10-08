@@ -23,7 +23,7 @@ static:
 	if grep -q libSDL2 target/static/runtime-libraries.txt; then \
 		echo "SDL2 was not linked statically" >&2; exit 1; \
 	fi; \
-	printf 'SDL2-static executable: %s\nOS graphics libraries/CRT remain dynamic; no SDL2 runtime package is required.\n' "$$binary"
+	printf 'SDL2-static executable: %s\nNative codecs/OS graphics libraries/CRT remain dynamic; no SDL2 runtime package is required.\n' "$$binary"
 
 test:
 	RUST_TEST_THREADS=$(TEST_THREADS) $(CARGO) test --locked -j $(JOBS)

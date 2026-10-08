@@ -7,6 +7,8 @@ description = "Native fullscreen 16-bit grayscale image windowing for X11 and th
 license = "Apache-2.0"
 
 [features]
+default = ["bundled-heif"]
+bundled-heif = ["libheif-rs/embedded-libheif"]
 static-sdl2 = ["sdl2/bundled", "sdl2/static-link"]
 
 [dependencies]
@@ -15,6 +17,8 @@ clap = { version = "4.5", features = ["derive"] }
 fastrand = "2.3"
 font8x8 = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "tiff", "webp", "pnm", "tga", "hdr", "exr", "qoi", "ff"] }
+libheif-rs = { version = "2.7", default-features = false, features = ["v1_17"] }
+rawler = "0.8"
 rayon = "1.11"
 sdl2 = { version = "0.38", features = ["use-pkgconfig"] }
 serde = { version = "1.0", features = ["derive"] }

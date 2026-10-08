@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use image::{DynamicImage, ImageDecoder, ImageReader};
+use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -8,6 +8,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
+
+mod dng;
+mod heif;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -22,6 +25,11 @@ pub fn supported_extension(path: &Path) -> bool {
             matches!(
                 value.to_ascii_lowercase().as_str(),
                 "png"
+                    | "dng"
+                    | "heic"
+                    | "heif"
+                    | "hif"
+                    | "avif"
                     | "jpg"
                     | "jpeg"
                     | "jpe"
@@ -203,10 +211,16 @@ pub fn decode(path: &Path) -> Result<LoadedImage> {
         "not a regular image file: {}",
         path.display()
     );
+    if heif::is_heif(path)? {
+        return LoadedImage::new(heif::decode(path)?);
+    }
     let reader = ImageReader::open(path)
         .with_context(|| format!("opening {:?}", path))?
         .with_guessed_format()
         .context("detecting image format")?;
+    if reader.format() == Some(ImageFormat::Tiff) && dng::is_dng(path)? {
+        return LoadedImage::new(dng::decode(path)?);
+    }
     let mut decoder = reader.into_decoder().context("opening image decoder")?;
     let orientation = decoder.orientation().context("reading image orientation")?;
     let mut image = DynamicImage::from_decoder(decoder).context("decoding image pixels")?;
@@ -218,10 +232,26 @@ pub fn inspect(path: &Path) -> Result<Inspection> {
     Ok(decode(path)?.info)
 }
 
-pub fn window_sample(sample: u16, shift: u32) -> Result<u8> {
-    ensure!(
-        shift <= 8,
-        "an 8-bit window in Gray16 requires a shift from 0 to 8"
-    );
-    Ok((sample >> shift).min(255) as u8)
+pub(crate) struct GrayWindow {
+    scale: f64,
+}
+
+impl GrayWindow {
+    pub fn new(shift: f64) -> Result<Self> {
+        ensure!(
+            shift.is_finite() && (0.0..=8.0).contains(&shift),
+            "an 8-bit window in Gray16 requires a finite shift from 0 to 8"
+        );
+        Ok(Self {
+            scale: (-shift).exp2(),
+        })
+    }
+
+    pub fn sample(&self, sample: u16) -> u8 {
+        (f64::from(sample) * self.scale).min(255.0) as u8
+    }
+}
+
+pub fn window_sample(sample: u16, shift: impl Into<f64>) -> Result<u8> {
+    Ok(GrayWindow::new(shift.into())?.sample(sample))
 }

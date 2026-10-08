@@ -41,6 +41,21 @@ fn every_code_and_window_is_saturating_not_wrapping() {
 }
 
 #[test]
+fn fractional_windows_match_the_exposure_formula_for_every_code() {
+    for quarter in 0..=32 {
+        let shift = f64::from(quarter) / 4.0;
+        for sample in 0..=u16::MAX {
+            let expected = (f64::from(sample) / shift.exp2()).floor().min(255.0) as u8;
+            assert_eq!(images::window_sample(sample, shift).unwrap(), expected);
+        }
+    }
+    assert_eq!(images::window_sample(256, 0.25).unwrap(), 215);
+    for shift in [-1.0, 8.25, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(images::window_sample(65535, shift).is_err());
+    }
+}
+
+#[test]
 fn twelve_bit_example_defaults_to_the_full_range_window() {
     let Inspection::Dr(info) = gray(&[0, 1, 255, 256, 4095]).info else {
         panic!()
@@ -465,10 +480,13 @@ fn directory_errors_and_unsupported_formats_are_explicit() {
     for name in [
         "raw.DNG",
         "photo.heic",
+        "photo.HEIF",
+        "photo.hif",
         "photo.avif",
-        "photo.jxl",
-        "notes.txt",
     ] {
+        assert!(images::supported_extension(Path::new(name)));
+    }
+    for name in ["photo.jxl", "notes.txt"] {
         assert!(!images::supported_extension(Path::new(name)));
     }
 }

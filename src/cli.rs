@@ -1,6 +1,7 @@
 use crate::{
     backend,
     images::{self, Source},
+    view::DEFAULT_BRIGHTNESS_STEP,
 };
 use anyhow::{Result, ensure};
 use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser};
@@ -16,9 +17,9 @@ use std::{
     after_help = "Fit mode: LEFT/RIGHT previous/next; UP brighter, DOWN darker; Z native 1:1.\n\
         Native mode: arrows pan toward the requested image edge; X returns to fit.\n\
         ESC, Q or Ctrl+C exits with cleanup in both desktop and console modes.\n\
-        DR starts at the full-range window without extra highlight clipping.\n\
+        DR starts at the full-range window; UP/DOWN adjust by --brightness-step bits.\n\
         FreeBSD console: active physical text VT only, not SSH/tmux; switching VTs exits.\n\
-        Single-dash long options work: -dir /photos -shuffle.\n\
+        Single-dash long options work: -dir /photos -preload 3 -brightness-step 0.2.\n\
         Use --dir instead of a shell glob that exceeds the OS argument limit.")]
 pub struct Cli {
     #[arg(value_name = "IMAGE")]
@@ -36,6 +37,21 @@ pub struct Cli {
         help = "Print image/window information as JSON lines without opening a viewer"
     )]
     pub analyze: bool,
+    #[arg(
+        long,
+        default_value_t = 3,
+        value_name = "N",
+        help = "Preload N images on each side in the background; 0 disables preloading"
+    )]
+    pub preload: usize,
+    #[arg(
+        long,
+        default_value_t = DEFAULT_BRIGHTNESS_STEP,
+        value_parser = brightness_step,
+        value_name = "BITS",
+        help = "Positive brightness-window step in bits (up to 8)"
+    )]
+    pub brightness_step: f64,
     #[arg(skip)]
     pub sources: Vec<Source>,
 }
@@ -57,12 +73,20 @@ impl Cli {
                 return arg;
             }
             let bytes = arg.as_encoded_bytes();
-            let names = ["dir", "shuffle", "analyze", "help", "version"];
+            let names = [
+                "dir",
+                "shuffle",
+                "analyze",
+                "preload",
+                "brightness-step",
+                "help",
+                "version",
+            ];
             for name in names {
                 let single = format!("-{name}");
                 let double = format!("--{name}");
                 let separate = bytes == single.as_bytes() || bytes == double.as_bytes();
-                if separate && name == "dir" {
+                if separate && matches!(name, "dir" | "preload" | "brightness-step") {
                     value_next = true;
                 }
                 if bytes == single.as_bytes() || bytes.starts_with(format!("{single}=").as_bytes())
@@ -125,6 +149,15 @@ impl Cli {
             ensure!(errors == 0, "{errors} image(s) could not be inspected");
             return Ok(());
         }
-        backend::run(paths)
+        backend::run(paths, self.preload, self.brightness_step)
+    }
+}
+
+fn brightness_step(value: &str) -> Result<f64, String> {
+    let step: f64 = value.parse().map_err(|_| "expected a number of bits")?;
+    if step.is_finite() && step > 0.0 && step <= 8.0 {
+        Ok(step)
+    } else {
+        Err("brightness step must be finite, greater than 0 and at most 8 bits".into())
     }
 }

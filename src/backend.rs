@@ -1,6 +1,7 @@
 use crate::{
     console::Console,
-    images::{self, Inspection, LoadedImage},
+    images::{Inspection, LoadedImage},
+    loader::ImageLoader,
     signals::StopSignals,
     view::{self, Effect, Key, Mode, Size, View},
 };
@@ -13,8 +14,7 @@ use sdl2::{
 use std::{
     ffi::OsStr,
     path::PathBuf,
-    sync::mpsc,
-    thread,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -115,8 +115,8 @@ pub fn title(
                 info.width,
                 info.height,
                 info.code_bits,
-                view.shift,
-                view.shift + 8,
+                window_label(view.shift),
+                window_label(view.shift + 8.0),
             ),
             Inspection::Standard { width, height, .. } => {
                 format!("{mode} | standard {width}x{height}")
@@ -133,8 +133,19 @@ pub fn title(
     )
 }
 
-pub fn run(paths: Vec<PathBuf>) -> Result<()> {
+fn window_label(shift: f64) -> String {
+    format!("{shift:.6}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+pub fn run(paths: Vec<PathBuf>, preload: usize, brightness_step: f64) -> Result<()> {
     ensure!(!paths.is_empty(), "cannot view an empty playlist");
+    ensure!(
+        brightness_step.is_finite() && brightness_step > 0.0 && brightness_step <= 8.0,
+        "brightness step must be finite, greater than 0 and at most 8 bits"
+    );
     let shutdown = shutdown_signals()?;
     let driver = selected_driver(
         std::env::var_os("SDL_VIDEODRIVER").as_deref(),
@@ -147,7 +158,7 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
     );
     let mut console = Console::open(&driver)?;
     // All SDL objects must be destroyed before the guard can release a pending VT switch.
-    let result = run_sdl(paths, console.as_mut(), &shutdown);
+    let result = run_sdl(paths, preload, brightness_step, console.as_mut(), &shutdown);
     match console {
         Some(console) => console.finish(result),
         None => result,
@@ -156,6 +167,8 @@ pub fn run(paths: Vec<PathBuf>) -> Result<()> {
 
 fn run_sdl(
     paths: Vec<PathBuf>,
+    preload: usize,
+    brightness_step: f64,
     mut console: Option<&mut Console>,
     shutdown: &StopSignals,
 ) -> Result<()> {
@@ -193,28 +206,14 @@ fn run_sdl(
         .event_pump()
         .map_err(|error| anyhow!("opening native input: {error}"))?;
 
-    let (request_tx, request_rx) = mpsc::channel::<(u64, PathBuf)>();
-    let (result_tx, result_rx) = mpsc::channel();
-    let _loader = thread::Builder::new()
-        .name("image-loader".into())
-        .spawn(move || {
-            while let Ok(mut request) = request_rx.recv() {
-                while let Ok(newer) = request_rx.try_recv() {
-                    request = newer;
-                }
-                let result = images::decode(&request.1);
-                if result_tx.send((request.0, result)).is_err() {
-                    break;
-                }
-            }
-        })
-        .context("starting image loader")?;
+    let loader = ImageLoader::new(paths.clone(), preload)?;
     let mut index = 0usize;
     let mut generation = 0u64;
-    request_tx.send((generation, paths[index].clone()))?;
-    let mut image: Option<LoadedImage> = None;
+    loader.request(generation, index)?;
+    let mut image: Option<Arc<LoadedImage>> = None;
     let mut view = View::default();
     let mut pending_native = false;
+    let mut pending_window = None;
     let mut message = "Loading...".to_owned();
     let mut base = vec![0; size.frame_bytes()?];
     let mut shown = base.clone();
@@ -232,31 +231,6 @@ fn run_sdl(
     while !quitting {
         if shutdown.stopping() || console.as_ref().is_some_and(|console| console.stopping()) {
             break;
-        }
-        while let Ok((completed, result)) = result_rx.try_recv() {
-            if completed != generation {
-                continue;
-            }
-            match result {
-                Ok(loaded) => {
-                    view = View::new(&loaded.info);
-                    if pending_native {
-                        view.mode = Mode::Native;
-                    }
-                    image = Some(loaded);
-                    message.clear();
-                }
-                Err(error) => {
-                    failed = true;
-                    message = format!("Cannot load image: {error:#}");
-                    eprintln!("{:?}: {message}", paths[index]);
-                    image = None;
-                }
-            }
-            render = true;
-            present = true;
-            hud_visible = true;
-            hud_until = Instant::now() + Duration::from_secs(4);
         }
         let mut batch = Vec::new();
         if let Some(event) = events.wait_event_timeout(if present { 0 } else { 30 }) {
@@ -289,7 +263,7 @@ fn run_sdl(
                         texture = creator
                             .create_texture_streaming(PixelFormatEnum::RGB24, width, height)
                             .context("resizing viewport texture")?;
-                        view.clamp_pan(image.as_ref().map(LoadedImage::size), size);
+                        view.clamp_pan(image.as_deref().map(LoadedImage::size), size);
                         render = true;
                         present = true;
                     }
@@ -341,13 +315,16 @@ fn run_sdl(
                     if next != index {
                         index = next;
                         generation += 1;
-                        image = None;
+                        if let Some(loaded) = image.take() {
+                            pending_window = match &loaded.info {
+                                Inspection::Dr(info) => Some((info.max_shift, view.shift)),
+                                Inspection::Standard { .. } => None,
+                            };
+                        }
                         view = View::default();
                         pending_native = false;
                         message = "Loading...".into();
-                        request_tx
-                            .send((generation, paths[index].clone()))
-                            .context("requesting next image")?;
+                        loader.request(generation, index)?;
                         render = true;
                     }
                 }
@@ -364,6 +341,40 @@ fn run_sdl(
         if shutdown.stopping() || console.as_ref().is_some_and(|console| console.stopping()) {
             break;
         }
+        while let Some((completed, result)) = loader.try_recv()? {
+            if completed != generation {
+                continue;
+            }
+            match result {
+                Ok(loaded) => {
+                    view = View::new(&loaded.info);
+                    view.brightness_step = brightness_step;
+                    if let (Inspection::Dr(info), Some((max_shift, shift))) =
+                        (&loaded.info, pending_window.take())
+                        && info.max_shift == max_shift
+                        && (0.0..=f64::from(max_shift)).contains(&shift)
+                    {
+                        view.shift = shift;
+                    }
+                    if pending_native {
+                        view.mode = Mode::Native;
+                    }
+                    image = Some(loaded);
+                    message.clear();
+                }
+                Err(error) => {
+                    failed = true;
+                    message = format!("Cannot load image: {error:#}");
+                    eprintln!("{:?}: {message}", paths[index]);
+                    image = None;
+                    pending_window = None;
+                }
+            }
+            render = true;
+            present = true;
+            hud_visible = true;
+            hud_until = Instant::now() + Duration::from_secs(4);
+        }
         if hud_visible && Instant::now() >= hud_until && image.is_some() {
             hud_visible = false;
             present = true;
@@ -378,7 +389,7 @@ fn run_sdl(
             present = true;
         }
         if present {
-            let caption = title(index, &paths, image.as_ref(), &view, &message);
+            let caption = title(index, &paths, image.as_deref(), &view, &message);
             canvas
                 .window_mut()
                 .set_title(&caption)
@@ -403,7 +414,7 @@ fn run_sdl(
             present = false;
         }
     }
-    drop(request_tx);
+    drop(loader);
     ensure!(
         !failed,
         "one or more images could not be decoded; see diagnostics above"
@@ -422,7 +433,13 @@ mod tests {
         assert_eq!(std::env::var("SDL_VIDEODRIVER").unwrap(), "x11");
         let shutdown = shutdown_signals().unwrap();
         let (mut console, before) = Console::test_pty().unwrap();
-        let result = run_sdl(vec![image.into()], Some(&mut console), &shutdown);
+        let result = run_sdl(
+            vec![image.into()],
+            3,
+            view::DEFAULT_BRIGHTNESS_STEP,
+            Some(&mut console),
+            &shutdown,
+        );
         console.finish(result).unwrap();
         let mut after = unsafe { std::mem::zeroed::<libc::termios>() };
         assert_eq!(

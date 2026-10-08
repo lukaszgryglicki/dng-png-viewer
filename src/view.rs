@@ -1,8 +1,10 @@
-use crate::images::{Inspection, LoadedImage};
+use crate::images::{GrayWindow, Inspection, LoadedImage};
 use anyhow::{Result, ensure};
 use font8x8::UnicodeFonts;
 use image::DynamicImage;
 use rayon::prelude::*;
+
+pub const DEFAULT_BRIGHTNESS_STEP: f64 = 0.2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
@@ -48,12 +50,25 @@ pub enum Effect {
     Quit,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct View {
     pub mode: Mode,
-    pub shift: u32,
+    pub shift: f64,
+    pub brightness_step: f64,
     pub pan_x: i64,
     pub pan_y: i64,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Fit,
+            shift: 0.0,
+            brightness_step: DEFAULT_BRIGHTNESS_STEP,
+            pan_x: 0,
+            pan_y: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,8 +83,8 @@ impl View {
     pub fn new(info: &Inspection) -> Self {
         Self {
             shift: match info {
-                Inspection::Dr(info) => info.initial_shift,
-                _ => 0,
+                Inspection::Dr(info) => f64::from(info.initial_shift),
+                _ => 0.0,
             },
             ..Self::default()
         }
@@ -135,10 +150,16 @@ impl View {
             Key::Up | Key::Down if self.mode == Mode::Fit => {
                 if let Inspection::Dr(info) = info {
                     self.shift = if key == Key::Up {
-                        self.shift.saturating_sub(1)
+                        (self.shift - self.brightness_step).max(0.0)
                     } else {
-                        (self.shift + 1).min(info.max_shift)
+                        (self.shift + self.brightness_step).min(f64::from(info.max_shift))
                     };
+                    // Keep whole-bit windows exact after repeated decimal steps.
+                    let integer = self.shift.round();
+                    let roundoff = (8.0 * f64::EPSILON).min(self.brightness_step / 2.0);
+                    if (self.shift - integer).abs() <= roundoff {
+                        self.shift = integer;
+                    }
                 }
             }
             Key::Left => self.pan_x = self.pan_x.saturating_add(64),
@@ -156,12 +177,12 @@ impl View {
 }
 
 pub fn render(image: &LoadedImage, view: &View, size: Size) -> Result<Vec<u8>> {
-    ensure!(view.shift <= 8, "invalid Gray16 window shift");
+    let window = GrayWindow::new(view.shift)?;
     let mut frame = vec![0; size.frame_bytes()?];
     let layout = view.layout(image.size(), size);
     match &image.image {
         DynamicImage::ImageLuma16(pixels) => draw(&mut frame, size, layout, |x, y| {
-            let value = (pixels.get_pixel(x, y).0[0] >> view.shift).min(255) as u8;
+            let value = window.sample(pixels.get_pixel(x, y).0[0]);
             [value, value, value, 255]
         }),
         DynamicImage::ImageRgba8(pixels) => {

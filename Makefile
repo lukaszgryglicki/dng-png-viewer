@@ -4,31 +4,41 @@ JOBS ?= 4
 TEST_THREADS ?= 4
 PYTHON ?= python3
 INSTALL_DIR ?= /data/scripts
+BUILD_PATH = $(HOME)/.cargo/bin:$(PATH):/opt/homebrew/bin:/usr/local/bin
+CHECK_REQUIREMENTS = PATH="$(BUILD_PATH)" CARGO="$(CARGO)" sh scripts/requirements.sh check
 
 all: test build
 
 build: release
 
+requirements:
+	@PATH="$(BUILD_PATH)" CARGO="$(CARGO)" sh scripts/requirements.sh install
+
 target/.heif-config: .cargo/config.toml .cargo/heif.cmake
-	$(CARGO) clean -p libheif-sys
-	$(CARGO) clean --release -p libheif-sys
-	CARGO_TARGET_DIR=target/static $(CARGO) clean --release -p libheif-sys
+	@$(CHECK_REQUIREMENTS)
+	PATH="$(BUILD_PATH)" $(CARGO) clean -p libheif-sys
+	PATH="$(BUILD_PATH)" $(CARGO) clean --release -p libheif-sys
+	PATH="$(BUILD_PATH)" CARGO_TARGET_DIR=target/static $(CARGO) clean --release -p libheif-sys
 	@mkdir -p target
 	@touch target/.heif-config
 
 target/static/.sdl2-config: .cargo/config.toml .cargo/sdl2.cmake
-	CARGO_TARGET_DIR=target/static $(CARGO) clean --release -p sdl2-sys
+	@$(CHECK_REQUIREMENTS)
+	PATH="$(BUILD_PATH)" CARGO_TARGET_DIR=target/static $(CARGO) clean --release -p sdl2-sys
 	@mkdir -p target/static
 	@touch target/static/.sdl2-config
 
 release: target/.heif-config
-	$(CARGO) build --locked --release -j $(JOBS)
+	@$(CHECK_REQUIREMENTS)
+	PATH="$(BUILD_PATH)" $(CARGO) build --locked --release -j $(JOBS)
 
 debug: target/.heif-config
-	$(CARGO) build --locked -j $(JOBS)
+	@$(CHECK_REQUIREMENTS)
+	PATH="$(BUILD_PATH)" $(CARGO) build --locked -j $(JOBS)
 
 static: target/.heif-config target/static/.sdl2-config
-	CARGO_TARGET_DIR=target/static CMAKE_BUILD_PARALLEL_LEVEL=$(JOBS) \
+	@$(CHECK_REQUIREMENTS)
+	PATH="$(BUILD_PATH)" CARGO_TARGET_DIR=target/static CMAKE_BUILD_PARALLEL_LEVEL=$(JOBS) \
 		$(CARGO) build --locked --release --features static-sdl2 -j $(JOBS)
 	@set -e; \
 	binary=target/static/release/dng-png-viewer; \
@@ -48,20 +58,22 @@ install: release static
 	install -m 755 dng-png-viewer.static "$(INSTALL_DIR)/dng-png-viewer"
 
 test: target/.heif-config
-	RUST_TEST_THREADS=$(TEST_THREADS) $(CARGO) test --locked -j $(JOBS)
+	@$(CHECK_REQUIREMENTS)
+	PATH="$(BUILD_PATH)" RUST_TEST_THREADS=$(TEST_THREADS) $(CARGO) test --locked -j $(JOBS)
 
 test-display: release
-	$(CARGO) test --locked --release --lib --no-run -j $(JOBS) --message-format=json > target/display-test-binaries.jsonl
-	$(PYTHON) tests/display.py target/release/dng-png-viewer target/display-test-binaries.jsonl
+	PATH="$(BUILD_PATH)" $(CARGO) test --locked --release --lib --no-run -j $(JOBS) --message-format=json > target/display-test-binaries.jsonl
+	PATH="$(BUILD_PATH)" $(PYTHON) tests/display.py target/release/dng-png-viewer target/display-test-binaries.jsonl
 
 fmt:
-	$(CARGO) fmt --all
+	PATH="$(BUILD_PATH)" $(CARGO) fmt --all
 
 lint:
-	$(CARGO) fmt --all -- --check
-	$(CARGO) clippy --locked --all-targets -j $(JOBS) -- -D warnings
+	@$(CHECK_REQUIREMENTS)
+	PATH="$(BUILD_PATH)" $(CARGO) fmt --all -- --check
+	PATH="$(BUILD_PATH)" $(CARGO) clippy --locked --all-targets -j $(JOBS) -- -D warnings
 
 clean:
-	$(CARGO) clean
+	PATH="$(BUILD_PATH)" $(CARGO) clean
 
-.PHONY: all build release debug static install test test-display fmt lint clean
+.PHONY: all build requirements release debug static install test test-display fmt lint clean

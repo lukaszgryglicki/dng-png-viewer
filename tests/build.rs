@@ -13,6 +13,12 @@ fn make_fixture() -> TempDir {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("Makefile"), include_str!("../Makefile")).unwrap();
     fs::create_dir(dir.path().join(".cargo")).unwrap();
+    fs::create_dir(dir.path().join("scripts")).unwrap();
+    fs::write(
+        dir.path().join("scripts/requirements.sh"),
+        include_str!("../scripts/requirements.sh"),
+    )
+    .unwrap();
     for name in ["config.toml", "heif.cmake", "sdl2.cmake"] {
         fs::write(dir.path().join(".cargo").join(name), []).unwrap();
     }
@@ -20,6 +26,46 @@ fn make_fixture() -> TempDir {
     fs::create_dir(&tools).unwrap();
     for (name, body) in [
         ("uname", "printf '%s\\n' \"$MOCK_OS\"\n"),
+        (
+            "rustc",
+            "printf 'rustc %s (fixture)\\n' \"${MOCK_RUST_VERSION:-1.98.1}\"\n",
+        ),
+        (
+            "cmake",
+            "test \"$1\" = --version\n\
+             printf 'cmake version %s\\n' \"${MOCK_CMAKE_VERSION:-3.31.0}\"\n",
+        ),
+        (
+            "pkg-config",
+            "for package in \"$@\"; do\n\
+               if test \"$package\" = \"${MOCK_MISSING_PACKAGE:-}\"; then\n\
+                 echo \"Missing package: $package\" >&2; exit 1\n\
+               fi\n\
+             done\n",
+        ),
+        ("id", "echo 1000\n"),
+        (
+            "sudo",
+            "printf '%s\\n' \"$*\" >> privilege-calls\nexec \"$@\"\n",
+        ),
+        ("xcode-select", "exit 0\n"),
+        (
+            "apt-get",
+            "printf '%s\\n' \"$*\" >> package-calls\n\
+             exit \"${MOCK_PACKAGE_STATUS:-0}\"\n",
+        ),
+        (
+            "pkg",
+            "if test \"$1\" = info; then exit 1; fi\n\
+             printf '%s\\n' \"$*\" >> package-calls\n\
+             exit \"${MOCK_PACKAGE_STATUS:-0}\"\n",
+        ),
+        (
+            "brew",
+            "if test \"$1\" = list; then exit 1; fi\n\
+             printf '%s\\n' \"$*\" >> package-calls\n\
+             exit \"${MOCK_PACKAGE_STATUS:-0}\"\n",
+        ),
         (
             "ldd",
             "echo ldd >> inspections\nprintf '%s\\n' \"$MOCK_LIBRARIES\"\n",
@@ -55,10 +101,71 @@ fn make_command(dir: &Path, os: &str, libraries: &str) -> Command {
         .args(["CARGO=cargo", "JOBS=2", "INSTALL_DIR=installed scripts"])
         .current_dir(dir)
         .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("HOME", dir)
         .env_remove("CARGO_TARGET_DIR")
         .env("MOCK_OS", os)
         .env("MOCK_LIBRARIES", libraries);
     command
+}
+
+#[test]
+fn install_reports_missing_dependencies_before_building_or_cleaning_anything() {
+    for (variable, value, message) in [
+        ("MOCK_MISSING_PACKAGE", "sdl2", "Missing SDL2"),
+        ("MOCK_MISSING_PACKAGE", "libde265", "Missing SDL2"),
+        ("MOCK_MISSING_PACKAGE", "gbm", "Missing X11/DRM/GBM/EGL"),
+        ("MOCK_RUST_VERSION", "1.88.0", "Rust 1.89+"),
+        ("MOCK_CMAKE_VERSION", "3.21.0", "CMake 3.22+"),
+    ] {
+        let dir = make_fixture();
+        let result = make_command(dir.path(), "Linux", "")
+            .arg("install")
+            .env(variable, value)
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{variable}: {result:?}");
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(error.contains(message), "{error}");
+        assert!(error.contains("make requirements"), "{error}");
+        assert!(!dir.path().join("calls").exists());
+        assert!(!dir.path().join("package-calls").exists());
+        assert!(!dir.path().join("privilege-calls").exists());
+    }
+}
+
+#[test]
+fn requirements_installs_native_dependencies_on_each_supported_platform() {
+    for os in ["FreeBSD", "Linux", "Darwin"] {
+        let dir = make_fixture();
+        let result = make_command(dir.path(), os, "")
+            .arg("requirements")
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{os}: {result:?}");
+        let packages = fs::read_to_string(dir.path().join("package-calls")).unwrap();
+        for dependency in ["cmake", "sdl2", "x265", "aom", "libde265"] {
+            assert!(packages.contains(dependency), "{packages}");
+        }
+        if os == "Linux" {
+            assert!(packages.contains("aom-tools"));
+            assert!(packages.contains("libnuma-dev"));
+        }
+        assert!(!packages.contains("musl"));
+        assert_eq!(dir.path().join("privilege-calls").exists(), os != "Darwin");
+        assert!(!dir.path().join("calls").exists());
+    }
+}
+
+#[test]
+fn requirements_reports_package_manager_failure_without_building() {
+    let dir = make_fixture();
+    let result = make_command(dir.path(), "Linux", "")
+        .arg("requirements")
+        .env("MOCK_PACKAGE_STATUS", "23")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!dir.path().join("calls").exists());
 }
 
 #[test]

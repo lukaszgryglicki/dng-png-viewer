@@ -3,10 +3,63 @@
 use std::{
     fs::{self, FileTimes},
     os::unix::fs::PermissionsExt,
+    path::Path,
     process::Command,
     time::SystemTime,
 };
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
+
+fn make_fixture() -> TempDir {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("Makefile"), include_str!("../Makefile")).unwrap();
+    fs::create_dir(dir.path().join(".cargo")).unwrap();
+    for name in ["config.toml", "heif.cmake", "sdl2.cmake"] {
+        fs::write(dir.path().join(".cargo").join(name), []).unwrap();
+    }
+    let tools = dir.path().join("tools");
+    fs::create_dir(&tools).unwrap();
+    for (name, body) in [
+        ("uname", "printf '%s\\n' \"$MOCK_OS\"\n"),
+        (
+            "ldd",
+            "echo ldd >> inspections\nprintf '%s\\n' \"$MOCK_LIBRARIES\"\n",
+        ),
+        (
+            "otool",
+            "echo otool >> inspections\nprintf '%s\\n' \"$MOCK_LIBRARIES\"\n",
+        ),
+        (
+            "cargo",
+            "printf '%s %s\\n' \"${CARGO_TARGET_DIR:-target}\" \"$*\" >> calls\n\
+             if test \"$1\" = build; then\n\
+               target=\"${CARGO_TARGET_DIR:-target}\"\n\
+               mkdir -p \"$target/release\"\n\
+               printf '%s executable\\n' \"$target\" > \"$target/release/dng-png-viewer\"\n\
+             elif test \"$1\" = clean && test \"$#\" -eq 1; then\n\
+               rm -rf target\n\
+             fi\n",
+        ),
+    ] {
+        let path = tools.join(name);
+        fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+fn make_command(dir: &Path, os: &str, libraries: &str) -> Command {
+    let mut paths = vec![dir.join("tools")];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let mut command = Command::new("make");
+    command
+        .args(["CARGO=cargo", "JOBS=2", "INSTALL_DIR=installed scripts"])
+        .current_dir(dir)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env_remove("CARGO_TARGET_DIR")
+        .env("MOCK_OS", os)
+        .env("MOCK_LIBRARIES", libraries);
+    command
+}
 
 #[test]
 fn bundled_heif_requires_both_decoders_and_disables_external_decoder_plugins() {
@@ -105,48 +158,10 @@ fn bundled_sdl_config_accepts_legacy_minimum_with_current_cmake() {
 #[test]
 fn make_refreshes_native_profiles_once_and_checks_platform_specific_sdl_linkage() {
     for os in ["FreeBSD", "Linux", "Darwin"] {
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join("Makefile"), include_str!("../Makefile")).unwrap();
-        fs::create_dir(dir.path().join(".cargo")).unwrap();
-        fs::write(dir.path().join(".cargo/config.toml"), []).unwrap();
-        fs::write(dir.path().join(".cargo/heif.cmake"), []).unwrap();
-        fs::write(dir.path().join(".cargo/sdl2.cmake"), []).unwrap();
-        let tools = dir.path().join("tools");
-        fs::create_dir(&tools).unwrap();
-        for (name, body) in [
-            ("uname", "printf '%s\\n' \"$MOCK_OS\"\n"),
-            (
-                "ldd",
-                "echo ldd >> inspections\nprintf '%s\\n' \"$MOCK_LIBRARIES\"\n",
-            ),
-            (
-                "otool",
-                "echo otool >> inspections\nprintf '%s\\n' \"$MOCK_LIBRARIES\"\n",
-            ),
-            (
-                "cargo",
-                "printf '%s %s\\n' \"${CARGO_TARGET_DIR:-target}\" \"$*\" >> calls\n\
-                       if test \"$1\" = build; then\n\
-                         mkdir -p target/static/release\n\
-                         : > target/static/release/dng-png-viewer\n\
-                       fi\n",
-            ),
-        ] {
-            let path = tools.join(name);
-            fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}")).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let mut paths = vec![tools];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-        let path = std::env::join_paths(paths).unwrap();
+        let dir = make_fixture();
         let run = |libraries: &str| {
-            Command::new("make")
-                .args(["static", "CARGO=cargo", "JOBS=2"])
-                .current_dir(dir.path())
-                .env("PATH", &path)
-                .env_remove("CARGO_TARGET_DIR")
-                .env("MOCK_OS", os)
-                .env("MOCK_LIBRARIES", libraries)
+            make_command(dir.path(), os, libraries)
+                .arg("static")
                 .output()
                 .unwrap()
         };
@@ -195,4 +210,65 @@ fn make_refreshes_native_profiles_once_and_checks_platform_specific_sdl_linkage(
             );
         }
     }
+}
+
+#[test]
+fn install_copies_both_profiles_and_clean_preserves_all_three_executables() {
+    assert!(include_str!("../Makefile").contains("INSTALL_DIR ?= /data/scripts"));
+    for os in ["FreeBSD", "Linux", "Darwin"] {
+        for goals in [
+            &["install"][..],
+            &["release", "static", "install", "clean"][..],
+        ] {
+            let dir = make_fixture();
+            let result = make_command(dir.path(), os, "program:\n/usr/lib/libSystem.B.dylib")
+                .args(goals)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{os}: {result:?}");
+            for (name, expected) in [
+                ("dng-png-viewer", "target executable\n"),
+                ("dng-png-viewer.static", "target/static executable\n"),
+                (
+                    "installed scripts/dng-png-viewer",
+                    "target/static executable\n",
+                ),
+            ] {
+                let path = dir.path().join(name);
+                assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o755
+                );
+            }
+            assert_eq!(
+                fs::read_to_string(dir.path().join("calls"))
+                    .unwrap()
+                    .lines()
+                    .filter(|line| line.contains(" build "))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                dir.path().join("target").exists(),
+                !goals.contains(&"clean")
+            );
+            assert!(
+                !dir.path()
+                    .join("installed scripts/dng-png-viewer.static")
+                    .exists()
+            );
+        }
+    }
+}
+
+#[test]
+fn install_reports_destination_errors() {
+    let dir = make_fixture();
+    let result = make_command(dir.path(), "FreeBSD", "/usr/lib/libc.so")
+        .args(["install", "INSTALL_DIR=Makefile"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!result.stderr.is_empty());
 }

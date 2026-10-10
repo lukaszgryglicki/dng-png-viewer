@@ -30,13 +30,24 @@ make                  # tests and stripped release build
 make release          # target/release/dng-png-viewer
 make debug            # target/debug/dng-png-viewer
 make static           # target/static/release/dng-png-viewer (embeds SDL2)
+make install          # build both; copy both to repo root, static to /data/scripts
 make test
 make lint             # formatting and strict Clippy
 ```
 
 Build/test parallelism defaults to four jobs/threads; override with `JOBS=...`
 and `TEST_THREADS=...`. Runtime pixel processing uses available CPU threads;
-`RAYON_NUM_THREADS=4` can bound it. `make clean` removes Cargo build artifacts.
+`RAYON_NUM_THREADS=4` can bound it.
+
+`make install` builds both profiles and copies the normal release executable to
+`./dng-png-viewer`, the SDL2-static executable to `./dng-png-viewer.static`, and
+that static executable to `/data/scripts/dng-png-viewer`. Override the latter
+directory with `INSTALL_DIR=/your/path`; it must be writable by the invoking
+user. Both repository-root executables are ignored by Git.
+
+`make release static install clean` performs the complete sequence. `make clean`
+removes Cargo build artifacts but preserves both repository-root executables
+and the installed copy. Omit `clean` to keep incremental build caches.
 
 The default `bundled-heif` feature builds the packaged libheif source locally,
 using libde265 for HEVC and libaom (or dav1d when installed) for AV1. Native codec

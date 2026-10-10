@@ -1,6 +1,10 @@
 use dng_png_viewer::cli::Cli;
 use std::process::ExitCode;
 
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     #[cfg(target_os = "freebsd")]
     // Before any threads start: never let SDL detach the physical console keyboard.

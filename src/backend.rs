@@ -19,7 +19,9 @@ use std::{
 };
 
 pub fn video_driver(display: Option<&OsStr>, wayland: Option<&OsStr>) -> &'static str {
-    if display.is_some_and(|value| !value.is_empty()) {
+    if cfg!(target_os = "macos") {
+        "cocoa"
+    } else if display.is_some_and(|value| !value.is_empty()) {
         "x11"
     } else if wayland.is_some_and(|value| !value.is_empty()) {
         "wayland"
@@ -193,7 +195,7 @@ fn run_sdl(
         return Ok(());
     }
     let sdl = sdl2::init().map_err(|error| anyhow!("initializing SDL2: {error}"))?;
-    let video = sdl.video().map_err(|error| anyhow!("opening native video output: {error}; X11 needs DISPLAY, console mode needs a KMSDRM-capable SDL2 and device access"))?;
+    let video = sdl.video().map_err(|error| anyhow!("opening native video output: {error}; macOS needs a graphical login session, X11 needs DISPLAY, console mode needs a KMSDRM-capable SDL2 and device access"))?;
     let mode = video
         .desktop_display_mode(0)
         .map_err(|error| anyhow!("reading display mode: {error}"))?;

@@ -31,6 +31,9 @@ walkdir = "2.5"
 [target.'cfg(target_os = "freebsd")'.dependencies]
 libc = "0.2"
 
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+mimalloc = "0.1.52"
+
 [dev-dependencies]
 jpeg-encoder = "0.7"
 openjpeg-sys = { version = "1.0.8", default-features = false }

@@ -1,3 +1,4 @@
 [env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 CMAKE_TOOLCHAIN_FILE = { value = ".cargo/heif.cmake", relative = true }
 SDL2_TOOLCHAIN = { value = ".cargo/sdl2.cmake", relative = true }

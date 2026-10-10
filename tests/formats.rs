@@ -531,7 +531,7 @@ fn corrupt_raw_and_heif_images_report_errors() {
     assert!(images::decode(&crop).is_err());
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn new_format_non_utf8_paths() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};

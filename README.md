@@ -1,8 +1,9 @@
 # dng-png-viewer
 
 A native Rust fullscreen image viewer for exploring **16-bit grayscale samples
-through a movable 8-bit display window**. It runs under Xorg/XFCE or directly on
-a supported KMS/DRM text console. Ordinary images use normal 8-bit color display.
+through a movable 8-bit display window**. It runs natively on macOS, under
+Xorg/XFCE, or directly on a supported FreeBSD/Linux KMS/DRM text console.
+Ordinary images use normal 8-bit color display.
 
 The program decodes images, selects windows, scales/pans, draws and handles keys
 itself. **No external viewer, mpv, FFmpeg executable, helper process or temporary
@@ -12,7 +13,7 @@ are read-only.
 
 ## Build
 
-Requires Rust 1.89+, C/C++ compilers, CMake, `pkg-config`, and SDL2, libde265 and
+Requires Rust 1.89+, C/C++ compilers, CMake 3.22+, `pkg-config`, and SDL2, libde265 and
 libaom development files. The codec tests also need x265 to generate HEIC fixtures.
 
 ```sh
@@ -20,7 +21,10 @@ libaom development files. The codec tests also need x265 to generate HEIC fixtur
 sudo pkg install sdl2 pkgconf cmake libde265 aom x265
 
 # Debian/Ubuntu
-sudo apt install build-essential cmake pkg-config libsdl2-dev libde265-dev libaom-dev libx265-dev
+sudo apt install build-essential cmake pkg-config libsdl2-dev libde265-dev libaom-dev libx265-dev aom-tools libnuma-dev
+
+# macOS (Xcode Command Line Tools and Homebrew)
+brew install cmake pkgconf sdl2 libde265 aom x265
 
 make                  # tests and stripped release build
 make release          # target/release/dng-png-viewer
@@ -40,10 +44,27 @@ libraries remain dynamically linked; no system libheif is replaced. Only HEVC/AV
 codecs are enabled by `.cargo/heif.cmake`; the existing SDL2-specific toolchain
 remains separate. JPEG2000 uses packaged OpenJPEG source built with the program;
 no separate OpenJPEG development package is needed.
+Ubuntu's native package exports can also require `aom-tools` (AOM CMake targets)
+and `libnuma-dev` (x265's advertised linker dependency), as listed above.
+Alpine's corresponding x265 linker dependency is supplied by `numactl-dev`.
 To use a system libheif >=1.17 instead, install its development
 package and build with `cargo build --locked --release --no-default-features`.
 That library must have suitable HEVC/AV1 decoders: some FFmpeg-backed builds reject
 12-bit grayscale HEIC. Missing codecs or unsupported files produce explicit errors.
+
+Bundled builds require libde265 and libaom at configuration time; they no longer
+silently omit HEVC/AV1 decoding when a development package is missing. The
+decoder runs inside the viewer, not in an external image-viewing program.
+The Makefile refreshes the HEIF dependency's debug, release and SDL2-static
+caches when the HEIF configuration changes. For direct Cargo builds, after
+installing previously missing codecs or changing `.cargo/heif.cmake`, refresh
+the relevant cache before rebuilding:
+
+```sh
+cargo clean -p libheif-sys                 # debug
+cargo clean --release -p libheif-sys       # normal release
+CARGO_TARGET_DIR=target/static cargo clean --release -p libheif-sys
+```
 
 **`make static` embeds SDL2**, building its packaged source with CMake and
 statically linking it along with the Rust code. It additionally requires
@@ -60,6 +81,19 @@ A fully static graphics stack is not supplied: the installed EGL/GBM/DRM
 libraries do not provide static archives, and removing those backends would
 break the required console support. The normal release/debug builds continue
 using the system SDL2.
+
+On macOS, `make static` also embeds SDL2 and checks dependencies with `otool`.
+Apple system frameworks and native codec libraries remain dynamic. On Linux
+the usual `make static` uses the native GNU toolchain, not musl. Builds targeting
+Linux musl (with matching native dependencies) use mimalloc for Rust allocations
+to avoid musl allocator contention; GNU/Linux, FreeBSD and macOS builds retain
+their system allocator.
+For native musl builds using shared SDL2/codec libraries, disable the default
+static CRT: `RUSTFLAGS="-C target-feature=-crt-static" cargo build --locked`.
+
+Cargo supplies the policy compatibility floor needed by bundled SDL2 with
+CMake 4. The Makefile refreshes its static native cache when the SDL/Cargo
+configuration changes, just as it does for HEIF.
 
 The bundled build disables unused HIDAPI/game-controller/haptic support to avoid
 an upstream SDL2 incompatibility with FreeBSD's USB headers. Keyboard input,
@@ -267,7 +301,11 @@ accurate sample statistics, so large collections still take time to inspect.
 
 ## Xorg/XFCE and the text console
 
-With `DISPLAY` set, the viewer selects SDL's X11 backend. With only
+On macOS the default backend is native SDL Cocoa, even if `DISPLAY` is set by
+XQuartz or an SSH session. A graphical macOS login session is required; KMSDRM
+is a FreeBSD/Linux backend, not a macOS console mode.
+
+On FreeBSD/Linux, with `DISPLAY` set, the viewer selects SDL's X11 backend. With only
 `WAYLAND_DISPLAY`, it selects Wayland. Without either, it selects **KMSDRM**.
 An explicit `SDL_VIDEODRIVER` overrides automatic selection.
 Select one driver only; comma-separated fallback lists are rejected so a failed

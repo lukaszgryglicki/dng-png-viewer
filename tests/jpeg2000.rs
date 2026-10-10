@@ -184,8 +184,11 @@ fn rgb_and_alpha_are_standard_display_with_full_range() {
 fn magic_detection_raw_codestreams_and_directory_discovery() {
     let tmp = tempdir().unwrap();
     let fixture = Fixture::gray(12, false);
-    for extension in ["jp2", "JP2", "j2k", "j2c", "jpc", "data"] {
-        let path = tmp.path().join(format!("image.{extension}"));
+    for (index, extension) in ["jp2", "JP2", "j2k", "j2c", "jpc", "data"]
+        .into_iter()
+        .enumerate()
+    {
+        let path = tmp.path().join(format!("image-{index}.{extension}"));
         fixture.write(&path, extension != "jp2" && extension != "JP2");
         assert!(matches!(
             images::decode(&path).unwrap().image,
@@ -245,7 +248,7 @@ fn jp2_exif_orientation_rotates_native_samples() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn non_utf8_paths_are_supported() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};

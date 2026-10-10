@@ -50,7 +50,7 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
             },
             Some(options),
         )
-        .context("decoding HEIF pixels (requires an installed HEVC/AV1 decoder)")?;
+        .context("decoding HEIF pixels with the in-process HEVC/AV1 decoder")?;
     if gray16 {
         let plane = decoded
             .planes()

@@ -12,7 +12,7 @@ use std::{
 };
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Native fullscreen Gray16 bit-window viewer for X11 and KMSDRM consoles.",
+#[command(version, about = "Native fullscreen Gray16 bit-window viewer for macOS, X11 and KMSDRM consoles.",
     group(ArgGroup::new("sources").required(true).multiple(true).args(["images", "directories"])),
     after_help = "Fit mode: LEFT/RIGHT previous/next; UP brighter, DOWN darker; Z native 1:1.\n\
         Native mode: arrows pan toward the requested image edge; X returns to fit.\n\

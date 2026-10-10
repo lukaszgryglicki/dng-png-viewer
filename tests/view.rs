@@ -690,20 +690,37 @@ fn sdl_keys_and_display_selection_are_explicit() {
     );
     assert_eq!(
         backend::video_driver(Some(OsStr::new(":1")), Some(OsStr::new("wayland-0"))),
-        "x11"
+        if cfg!(target_os = "macos") {
+            "cocoa"
+        } else {
+            "x11"
+        }
     );
     assert_eq!(
         backend::video_driver(Some(OsStr::new("")), Some(OsStr::new("wayland-0"))),
-        "wayland"
+        if cfg!(target_os = "macos") {
+            "cocoa"
+        } else {
+            "wayland"
+        }
     );
-    assert_eq!(backend::video_driver(None, None), "KMSDRM");
+    let native_driver = if cfg!(target_os = "macos") {
+        "cocoa"
+    } else {
+        "KMSDRM"
+    };
+    assert_eq!(backend::video_driver(None, None), native_driver);
     assert_eq!(
         backend::video_driver(Some(OsStr::new("")), Some(OsStr::new(""))),
-        "KMSDRM"
+        native_driver
     );
     assert_eq!(
         backend::selected_driver(Some(OsStr::new("")), Some(OsStr::new(":1")), None).unwrap(),
-        "x11"
+        if cfg!(target_os = "macos") {
+            "cocoa"
+        } else {
+            "x11"
+        }
     );
     assert_eq!(
         backend::selected_driver(Some(OsStr::new("kmsdrm")), Some(OsStr::new(":1")), None).unwrap(),
@@ -719,6 +736,18 @@ fn sdl_keys_and_display_selection_are_explicit() {
         use std::os::unix::ffi::OsStrExt;
         assert!(backend::selected_driver(Some(OsStr::from_bytes(b"\xff")), None, None).is_err());
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn linked_sdl2_includes_native_cocoa_backend() {
+    let drivers: Vec<_> = sdl2::video::drivers().collect();
+    assert!(drivers.contains(&"cocoa"), "SDL2 lacks Cocoa: {drivers:?}");
+    assert_eq!(backend::selected_driver(None, None, None).unwrap(), "cocoa");
+    assert_eq!(
+        backend::selected_driver(Some(OsStr::new("dummy")), None, None).unwrap(),
+        "dummy"
+    );
 }
 
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]

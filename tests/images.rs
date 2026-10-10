@@ -509,7 +509,7 @@ fn symlink_files_deduplicate_without_recursing_directory_loops() {
     assert!(images::discover(&[Source::Directory(dir.path().into())]).is_err());
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn non_utf8_paths_remain_byte_safe() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -722,7 +722,7 @@ fn glob_recursion_does_not_follow_nested_directory_symlinks_or_hide_broken_links
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn globs_match_non_utf8_names_and_accept_non_utf8_literal_roots() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};

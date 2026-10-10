@@ -543,3 +543,284 @@ fn a_large_directory_becomes_one_in_memory_playlist() {
     assert_eq!(found.len(), 2048);
     assert_eq!(found.iter().collect::<HashSet<_>>().len(), 2048);
 }
+
+#[test]
+fn positional_directories_and_globs_keep_source_order_and_deduplicate() {
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("z.png");
+    let a = dir.path().join("album-a");
+    let b = dir.path().join("album-b");
+    fs::create_dir_all(a.join("nested")).unwrap();
+    fs::create_dir(&b).unwrap();
+    let paths = [
+        first.clone(),
+        a.join("a.JPG"),
+        a.join("nested/b.jp2"),
+        b.join("c.PNG"),
+    ];
+    for path in &paths {
+        fs::write(path, []).unwrap();
+    }
+    fs::write(a.join("notes.txt"), []).unwrap();
+    let found = images::discover(&[
+        Source::File(first),
+        Source::File(dir.path().join("album-?")),
+        Source::File(dir.path().join("*.png")),
+        Source::Directory(b),
+        Source::File(a),
+    ])
+    .unwrap();
+    assert_eq!(
+        found,
+        paths
+            .iter()
+            .map(|path| path.canonicalize().unwrap())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn globs_are_sorted_case_sensitive_and_respect_path_components() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("nested/deep")).unwrap();
+    for name in [
+        ".hidden.png",
+        "b01.png",
+        "b02.png",
+        "b03.PNG",
+        "nested/b04.png",
+        "nested/deep/b05.png",
+    ] {
+        fs::write(dir.path().join(name), []).unwrap();
+    }
+    for (pattern, names) in [
+        ("b*.png", vec!["b01.png", "b02.png"]),
+        ("b0?.png", vec!["b01.png", "b02.png"]),
+        ("b0[12].png", vec!["b01.png", "b02.png"]),
+        ("b0[!2].png", vec!["b01.png"]),
+        ("b*.{png,PNG}", vec!["b01.png", "b02.png", "b03.PNG"]),
+        ("*/b*.png", vec!["nested/b04.png"]),
+        (
+            "nested/**/*.png",
+            vec!["nested/b04.png", "nested/deep/b05.png"],
+        ),
+        (
+            "**/*.png",
+            vec![
+                ".hidden.png",
+                "b01.png",
+                "b02.png",
+                "nested/b04.png",
+                "nested/deep/b05.png",
+            ],
+        ),
+    ] {
+        assert_eq!(
+            images::discover(&[Source::File(dir.path().join(pattern))]).unwrap(),
+            names
+                .iter()
+                .map(|name| dir.path().join(name).canonicalize().unwrap())
+                .collect::<Vec<_>>(),
+            "{pattern}"
+        );
+    }
+}
+
+#[test]
+fn existing_metacharacter_paths_are_literal_and_glob_files_can_be_extensionless() {
+    let dir = tempdir().unwrap();
+    for name in [
+        "*",
+        "file[bad.png",
+        "file?.png",
+        "file{.png",
+        "without-extension",
+    ] {
+        let path = dir.path().join(name);
+        fs::write(&path, []).unwrap();
+        assert_eq!(
+            images::discover(&[Source::File(path.clone())]).unwrap(),
+            vec![path.canonicalize().unwrap()]
+        );
+    }
+    let album = dir.path().join("album[1]");
+    fs::create_dir(&album).unwrap();
+    let photo = album.join("photo.png");
+    fs::write(&photo, []).unwrap();
+    assert_eq!(
+        images::discover(&[Source::File(album)]).unwrap(),
+        vec![photo.canonicalize().unwrap()]
+    );
+    assert_eq!(
+        images::discover(&[Source::File(dir.path().join("without-*"))]).unwrap(),
+        vec![dir.path().join("without-extension").canonicalize().unwrap()]
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        images::discover(&[Source::File(dir.path().join(r"file\?.png"))]).unwrap(),
+        vec![dir.path().join("file?.png").canonicalize().unwrap()]
+    );
+}
+
+#[test]
+fn glob_errors_fail_even_when_other_inputs_are_valid() {
+    let dir = tempdir().unwrap();
+    let good = dir.path().join("good.png");
+    fs::write(&good, []).unwrap();
+    for pattern in ["missing*.png", "photo[.png", "[z-a].png", "*/missing.png"] {
+        let error = images::discover(&[
+            Source::File(good.clone()),
+            Source::File(dir.path().join(pattern)),
+        ])
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("glob"),
+            "{pattern}: {error:#}"
+        );
+    }
+    assert!(images::discover(&[Source::Directory(dir.path().join("*"))]).is_err());
+}
+
+#[test]
+fn directory_only_globs_expand_matches_recursively() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("album/nested")).unwrap();
+    let photo = dir.path().join("album/nested/a.png");
+    fs::write(&photo, []).unwrap();
+    fs::write(dir.path().join("not-a-directory.png"), []).unwrap();
+    assert_eq!(
+        images::discover(&[Source::File(dir.path().join("*/"))]).unwrap(),
+        vec![photo.canonicalize().unwrap()]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn glob_recursion_does_not_follow_nested_directory_symlinks_or_hide_broken_links() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let image = dir.path().join("one.png");
+    fs::write(&image, []).unwrap();
+    fs::write(outside.path().join("outside.png"), []).unwrap();
+    symlink(&image, dir.path().join("copy.png")).unwrap();
+    symlink(dir.path(), dir.path().join("loop.png")).unwrap();
+    symlink(dir.path(), dir.path().join("loop")).unwrap();
+    symlink(outside.path(), dir.path().join("outside")).unwrap();
+    let pattern = dir.path().join("**/*.png");
+    assert_eq!(
+        images::discover(&[Source::File(pattern.clone())]).unwrap(),
+        vec![image.canonicalize().unwrap()]
+    );
+    let broken = dir.path().join("broken*.png");
+    symlink(dir.path().join("missing"), &broken).unwrap();
+    assert!(images::discover(&[Source::File(pattern)]).is_err());
+    assert!(images::discover(&[Source::File(broken)]).is_err());
+    assert_eq!(
+        images::discover(&[Source::File(dir.path().join("outside/*.png"))]).unwrap(),
+        vec![outside.path().join("outside.png").canonicalize().unwrap()]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn globs_match_non_utf8_names_and_accept_non_utf8_literal_roots() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let dir = tempdir().unwrap();
+    let root = dir.path().join(OsString::from_vec(b"album-\xff".to_vec()));
+    fs::create_dir(&root).unwrap();
+    let image = root.join(OsString::from_vec(b".image-\xff.png".to_vec()));
+    fs::write(&image, []).unwrap();
+    for input in [
+        image.clone(),
+        root.clone(),
+        root.join("*.png"),
+        root.join(".image-?.png"),
+    ] {
+        assert_eq!(
+            images::discover(&[Source::File(input)]).unwrap(),
+            vec![image.canonicalize().unwrap()]
+        );
+    }
+    let invalid = root.join(OsString::from_vec(b"*-\xff.png".to_vec()));
+    let error = images::discover(&[Source::File(invalid)]).unwrap_err();
+    assert!(format!("{error:#}").contains("glob pattern must be valid UTF-8"));
+}
+
+#[cfg(unix)]
+#[test]
+fn glob_traversal_prunes_unmatched_directories_and_reports_relevant_errors() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    fs::create_dir(dir.path().join("a")).unwrap();
+    let image = dir.path().join("a/one.png");
+    fs::write(&image, []).unwrap();
+    let blocked = dir.path().join("unrelated");
+    fs::create_dir(&blocked).unwrap();
+    let original = fs::metadata(&blocked).unwrap().permissions();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o0)).unwrap();
+    let restricted = fs::read_dir(&blocked).is_err();
+    let pruned = images::discover(&[Source::File(dir.path().join("[ab]/*.png"))]);
+    let recursive = images::discover(&[Source::File(dir.path().join("**/*.png"))]);
+    fs::set_permissions(&blocked, original).unwrap();
+    assert_eq!(pruned.unwrap(), vec![image.canonicalize().unwrap()]);
+    if restricted {
+        assert!(format!("{:#}", recursive.unwrap_err()).contains("walking glob"));
+    }
+}
+
+#[test]
+#[ignore = "creates one million files; run explicitly with task-owned TMPDIR"]
+fn million_file_directory_and_quoted_glob_produce_the_same_shuffled_playlist() {
+    use dng_png_viewer::cli::Cli;
+    use std::ffi::OsString;
+    let dir = tempdir().unwrap();
+    for group in 0..1000 {
+        let folder = dir.path().join(format!("{group:03}"));
+        fs::create_dir(&folder).unwrap();
+        let first = folder.join("000.png");
+        png(
+            &first,
+            1,
+            1,
+            png::ColorType::Grayscale,
+            png::BitDepth::Sixteen,
+            &[15, 255],
+        );
+        for file in 1..1000 {
+            fs::hard_link(&first, folder.join(format!("{file:03}.png"))).unwrap();
+        }
+    }
+    let mut expected = images::discover(&[Source::File(dir.path().into())]).unwrap();
+    assert_eq!(expected.len(), 1_000_000);
+    assert!(expected.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        expected[0],
+        dir.path().join("000/000.png").canonicalize().unwrap()
+    );
+    assert_eq!(
+        expected.last().unwrap(),
+        &dir.path().join("999/999.png").canonicalize().unwrap()
+    );
+    let argument_bytes: usize = expected.iter().map(|path| path.as_os_str().len() + 1).sum();
+    assert!(argument_bytes > 32 * 1024 * 1024);
+    let cli = Cli::try_parse_compat([
+        OsString::from("viewer"),
+        dir.path().join("*/*.png").into_os_string(),
+        dir.path().join("999/999.png").into_os_string(),
+        OsString::from("-shuffle"),
+    ])
+    .unwrap();
+    fastrand::Rng::with_seed(9123).shuffle(&mut expected);
+    fastrand::seed(9123);
+    let actual = cli.playlist().unwrap();
+    assert_eq!(actual.len(), expected.len());
+    assert!(
+        actual == expected,
+        "directory and glob shuffle orders differ"
+    );
+    println!(
+        "Expanded and shuffled {} actual image paths ({argument_bytes} argument bytes) without decoding",
+        actual.len()
+    );
+}

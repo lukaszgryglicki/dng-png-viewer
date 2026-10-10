@@ -20,17 +20,24 @@ use std::{
         DR starts at the full-range window; UP/DOWN adjust by --brightness-step bits.\n\
         FreeBSD console: active physical text VT only, not SSH/tmux; switching VTs exits.\n\
         Single-dash long options work: -dir /photos -preload 3 -brightness-step 0.2.\n\
-        Use --dir instead of a shell glob that exceeds the OS argument limit.")]
+        Pass directories for recursive discovery; quote globs to expand them here, not in the shell.\n\
+        The complete image list has no count limit and is shuffled only once with --shuffle.")]
 pub struct Cli {
-    #[arg(value_name = "IMAGE")]
+    #[arg(
+        value_name = "INPUT",
+        help = "Image file, recursive directory, or quoted glob"
+    )]
     pub images: Vec<PathBuf>,
     #[arg(
         long = "dir",
         value_name = "DIRECTORY",
-        help = "Recursively add images; may be repeated and mixed with filenames"
+        help = "Recursively add images from a literal directory (also accepted positionally)"
     )]
     pub directories: Vec<PathBuf>,
-    #[arg(long, help = "Shuffle the complete deduplicated playlist")]
+    #[arg(
+        long,
+        help = "Shuffle once after expanding and deduplicating all inputs"
+    )]
     pub shuffle: bool,
     #[arg(
         long,

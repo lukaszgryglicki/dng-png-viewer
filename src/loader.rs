@@ -344,6 +344,54 @@ mod tests {
     }
 
     #[test]
+    fn million_path_shuffle_keeps_prefetch_in_final_order_and_decoding_bounded() {
+        let mut paths = paths(1_000_000);
+        fastrand::Rng::with_seed(9123).shuffle(&mut paths);
+        let plan = [
+            vec![
+                500_000, 500_001, 499_999, 500_002, 499_998, 500_003, 499_997,
+            ],
+            vec![999_999, 999_998, 999_997, 999_996],
+            vec![0, 1, 2, 3],
+        ]
+        .map(|order| {
+            let expected = order
+                .iter()
+                .map(|&position| index(&paths[position]))
+                .collect::<Vec<_>>();
+            let center = order[0];
+            let mut cache = order;
+            cache.sort_unstable();
+            (center, cache, expected)
+        });
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let loader = ImageLoader::with_decoder(paths, 3, move |path| {
+            let value = index(path);
+            recorded.lock().unwrap().push(value);
+            image(value)
+        })
+        .unwrap();
+        assert_eq!(loader.count, 1_000_000);
+        assert!(calls.lock().unwrap().is_empty());
+        let mut total = 0;
+        for (generation, (center, cache, expected)) in plan.into_iter().enumerate() {
+            loader.request(generation as u64, center).unwrap();
+            let loaded = receive(&loader, generation as u64).unwrap();
+            assert_eq!(
+                loaded.image.as_rgba8().unwrap().get_pixel(0, 0).0,
+                [expected[0] as u8, expected[0] as u8, expected[0] as u8, 255]
+            );
+            cached(&loader, &cache);
+            let mut actual = calls.lock().unwrap();
+            assert_eq!(*actual, expected);
+            total += actual.len();
+            actual.clear();
+        }
+        assert_eq!(total, 15);
+    }
+
+    #[test]
     fn blocked_preload_cannot_block_current_decode_and_stale_results_are_discarded() {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();

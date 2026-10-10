@@ -7,7 +7,8 @@ a supported KMS/DRM text console. Ordinary images use normal 8-bit color display
 The program decodes images, selects windows, scales/pans, draws and handles keys
 itself. **No external viewer, mpv, FFmpeg executable, helper process or temporary
 rendered image is needed.** SDL2 supplies native window, display and input access;
-DNG and HEIC/HEIF/AVIF decoding also happens in-process. Image files are read-only.
+DNG, HEIC/HEIF/AVIF and JPEG2000 decoding also happens in-process. Image files
+are read-only.
 
 ## Build
 
@@ -37,7 +38,9 @@ The default `bundled-heif` feature builds the packaged libheif source locally,
 using libde265 for HEVC and libaom (or dav1d when installed) for AV1. Native codec
 libraries remain dynamically linked; no system libheif is replaced. Only HEVC/AV1
 codecs are enabled by `.cargo/heif.cmake`; the existing SDL2-specific toolchain
-remains separate. To use a system libheif >=1.17 instead, install its development
+remains separate. JPEG2000 uses packaged OpenJPEG source built with the program;
+no separate OpenJPEG development package is needed.
+To use a system libheif >=1.17 instead, install its development
 package and build with `cargo build --locked --release --no-default-features`.
 That library must have suitable HEVC/AV1 decoders: some FFmpeg-backed builds reject
 12-bit grayscale HEIC. Missing codecs or unsupported files produce explicit errors.
@@ -164,6 +167,7 @@ white image has 16 code bits but zero sample-span bits.
 ## Ordinary images and metadata
 
 Supported formats: DNG, PNG, JPEG, HEIC/HEIF (`.heic`, `.heif`, `.hif`), AVIF,
+JPEG2000 (`.jp2` containers and `.j2k`/`.j2c`/`.jpc` codestreams),
 GIF, BMP, TIFF, WebP, ICO, PBM/PGM/PPM/PAM/PNM, TGA, QOI, farbfeld (`.ff`),
 Radiance HDR and OpenEXR. Animated formats display their initial image;
 HEIF containers display the primary image. This is a still-image viewer,
@@ -176,8 +180,11 @@ to ordinary color; floating-point DNGs also use the ordinary display path.
 
 Only decoded opaque high-bit-depth integer grayscale images enable DR scrolling:
 Gray16 PNG/TIFF/PGM, integer monochrome DNG, and compatible high-bit-depth
-monochrome HEIC/AVIF. Ten- and twelve-bit grayscale HEIF samples retain their
-decoded code values in 16-bit storage, without stretching them to 65535.
+monochrome HEIC/AVIF/JPEG2000. Ten- and twelve-bit grayscale HEIF samples and
+9-16-bit JPEG2000 samples retain their decoded code values in 16-bit storage,
+without stretching them to 65535. Signed JPEG2000 samples are biased into the
+corresponding unsigned code range. Unsupported JPEG2000 precision, subsampling
+or color/alpha layouts produce explicit errors rather than guessed colors.
 Eight-bit grayscale, RGB, RGBA, palette and grayscale-with-alpha images use the
 ordinary display path. Higher-precision color images, including 10/12-bit HEIC,
 are converted to 8-bit color; they do not enable DR scrolling.
@@ -191,27 +198,54 @@ viewing deliberately does not apply the PNG transfer tag.
 ## Options and large collections
 
 Both single and double dashes work, including `-dir=/photos` and `--dir /photos`.
+Positional inputs may be image files, directories, or **quoted globs**:
+
+```sh
+./target/release/dng-png-viewer /photos/album /more/photos -shuffle
+./target/release/dng-png-viewer '/photos/name*.jpg'
+./target/release/dng-png-viewer first.png '/photos/**/*.png' -dir /another/album
+```
+
+Directories are searched recursively without needing `-dir`. Quote wildcard
+patterns so the viewer expands them internally instead of the shell exceeding
+its argument limit before the program starts.
 
 | Option | Meaning |
 | --- | --- |
 | `-dir DIRECTORY` | Recursively add supported image extensions; repeat freely |
-| `-shuffle` | Shuffle the entire merged, deduplicated playlist |
+| `-shuffle` | Shuffle once after all inputs are expanded and deduplicated |
 | `-preload N` | Background-decode up to N images on each side; default 3, 0 disables preloading |
 | `-brightness-step BITS` | DR adjustment per Up/Down keypress; default 0.2, valid range greater than 0 through 8 |
 | `-downsample FILTER` | Shrinking filter: `area`/`full` (default average), `bilinear` (previous behavior), or one `random`, `middle`, `NE`, `NW`, `SE`, `SW` pixel |
 | `-analyze` | Print one JSON object per image without opening a display |
 | `-help`, `-h` | Help and controls |
 | `-version`, `-V` | Program version |
-| `--` | Treat subsequent arguments as filenames, even if they start with `-` |
+| `--` | Treat subsequent arguments as inputs, even if they start with `-` |
 
-Explicit files and directories retain their command-line order. Each directory's
-discoveries are sorted by path; extension matching is case-insensitive. Repeated
-canonical paths (including file symlinks) are included only once. Directory
-symlinks are not recursively followed, avoiding loops. Missing inputs, traversal
-errors and broken image symlinks are reported, not silently skipped. Explicit
-filenames can omit an extension when the codec recognizes their contents.
-Native non-UTF-8 paths remain usable; displayed/JSON names use replacement
-characters for undecodable bytes.
+Files, directories and globs retain their command-line order. Each directory's
+discoveries and each glob's matches are sorted by path. Directory discovery
+filters supported extensions case-insensitively; glob patterns are
+case-sensitive and include hidden names. `*`, `?`, bracket classes and recursive
+`**` patterns are supported. Glob-matched directories are recursively expanded
+too. Existing literal paths take precedence, even if their names contain
+wildcards; `-dir` always takes a literal directory.
+
+Repeated canonical paths (including file symlinks) are included only once, at
+their first occurrence. Nested directory symlinks are not traversed, avoiding
+loops; a directory symlink supplied or matched as an input can be used as a
+root. Missing inputs, malformed/unmatched globs, traversal errors and broken
+image symlinks are reported, not silently skipped. Explicit and glob-matched
+files can omit an extension when the codec recognizes their contents.
+Native non-UTF-8 filenames and literal directory prefixes remain usable,
+including filenames matched by globs; the wildcard portion of a pattern must
+be valid UTF-8. Displayed/JSON names use replacement characters for undecodable
+bytes.
+
+The complete path list has **no application-level image-count limit**, including
+collections of one million images. Paths must fit in available memory, but
+building the list does not decode the images. `-shuffle` runs once on the final
+list; navigation and prefetch use exactly that order for the whole viewing
+session. The expanded list is never passed to a shell or another process.
 
 Preloading keeps decoded pixels in a rolling cache of at most `2*N + 1` images,
 bounded by the playlist ends. Moving right schedules the new rightmost neighbor
@@ -226,11 +260,6 @@ The cache costs decoded-image memory, not compressed-file size: a 60-megapixel
 Gray16 image uses about 120 MB, so seven such images use about 840 MB, plus
 in-flight decoding and rendering buffers. Use a smaller radius or `-preload 0`
 on memory-constrained machines. Preloading is not used by `-analyze`.
-
-If a shell glob would exceed the operating system's argument limit, **replace
-the glob with `-dir`**. A program cannot fix `Argument list too long` after the
-shell fails to start it. The viewer walks directories and keeps its playlist
-in memory; it never forwards that playlist to another process.
 
 Analysis reports are JSON Lines on stdout; diagnostics go to stderr. Analysis
 needs no active display or video driver. It fully decodes each image to obtain
@@ -297,7 +326,7 @@ does not change desktop configuration, SDL installation or player settings.
 ## Tests
 
 `make test` exercises actual codecs (including synthetic DNG and 8/10/12-bit
-HEIC/AVIF fixtures), full 16-bit values and fractional windows, exact 1:1 pixels,
+HEIC/AVIF and 1-16-bit JPEG2000 fixtures), full 16-bit values and fractional windows, exact 1:1 pixels,
 resampling/alpha order, navigation/panning, orientation, CLI aliases,
 directory ordering/deduplication/symlinks and headless analysis. Worker tests
 cover the sliding preload cache, eviction, radius zero, rapid navigation,

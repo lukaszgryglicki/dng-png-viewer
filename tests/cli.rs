@@ -206,6 +206,8 @@ fn shuffle_applies_to_all_sources_after_deduplication() {
     let mut cli = Cli::try_parse_compat([
         OsString::from("viewer"),
         first.into_os_string(),
+        dir.path().join("0?.png").into_os_string(),
+        dir.path().into(),
         OsString::from("-dir"),
         dir.path().into(),
     ])
@@ -214,6 +216,9 @@ fn shuffle_applies_to_all_sources_after_deduplication() {
     cli.shuffle = true;
     fastrand::seed(9123);
     let shuffled = cli.playlist().unwrap();
+    let mut expected = ordered.clone();
+    fastrand::Rng::with_seed(9123).shuffle(&mut expected);
+    assert_eq!(shuffled, expected);
     fastrand::seed(9123);
     assert_eq!(cli.playlist().unwrap(), shuffled);
     assert_ne!(shuffled, ordered);
@@ -222,6 +227,106 @@ fn shuffle_applies_to_all_sources_after_deduplication() {
         ordered.iter().collect::<HashSet<_>>()
     );
     assert_eq!(shuffled.len(), 40);
+}
+
+#[test]
+fn positional_directories_and_quoted_globs_reach_headless_analysis_in_order() {
+    let dir = tempdir().unwrap();
+    let album = dir.path().join("album");
+    fs::create_dir(&album).unwrap();
+    let names = ["z.pgm", "a.pgm", "album/b.pgm", "album/c.pgm"];
+    for name in names {
+        fs::write(dir.path().join(name), b"P5\n1 1\n255\n\x80").unwrap();
+    }
+    fs::write(album.join("notes.txt"), b"not an image").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dng-png-viewer"))
+        .arg("-analyze")
+        .arg(dir.path().join("z.pgm"))
+        .arg(&album)
+        .arg(dir.path().join("*.pgm"))
+        .args(["--dir"])
+        .arg(&album)
+        .env("SDL_VIDEODRIVER", "not-a-driver")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let expected = ["z.pgm", "album/b.pgm", "album/c.pgm", "a.pgm"];
+    assert_eq!(actual.len(), expected.len());
+    for (record, name) in actual.iter().zip(expected) {
+        assert_eq!(
+            record["source"],
+            dir.path()
+                .join(name)
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
+        assert_eq!(record["image"]["mode"], "standard");
+    }
+}
+
+#[test]
+fn relative_quoted_globs_after_double_dash_preserve_option_like_names() {
+    let dir = tempdir().unwrap();
+    for name in ["-shuffle-a.pgm", "-shuffle-b.pgm"] {
+        fs::write(dir.path().join(name), b"P5\n1 1\n255\n\x80").unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_dng-png-viewer"))
+        .current_dir(dir.path())
+        .args(["-analyze", "--", "-shuffle-?.pgm"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(actual.len(), 2);
+    assert!(
+        actual[0]["source"]
+            .as_str()
+            .unwrap()
+            .ends_with("-shuffle-a.pgm")
+    );
+    assert!(
+        actual[1]["source"]
+            .as_str()
+            .unwrap()
+            .ends_with("-shuffle-b.pgm")
+    );
+}
+
+#[test]
+fn unmatched_and_invalid_globs_fail_before_analysis() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("good.pgm"), b"P5\n1 1\n255\n\x80").unwrap();
+    for pattern in ["missing*.png", "bad[.png"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dng-png-viewer"))
+            .arg("-analyze")
+            .arg(dir.path().join("good.pgm"))
+            .arg(dir.path().join(pattern))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("glob") && error.contains(pattern), "{error}");
+    }
 }
 
 #[cfg(unix)]

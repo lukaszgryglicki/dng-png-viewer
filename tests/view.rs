@@ -1,11 +1,12 @@
+use clap::ValueEnum;
 use dng_png_viewer::{
     backend,
     images::{Inspection, LoadedImage},
-    view::{self, Effect, Key, Mode, Size, View},
+    view::{self, DownsampleFilter, Effect, Key, Mode, Size, View},
 };
 use image::{DynamicImage, ImageBuffer, Rgba};
 use sdl2::keyboard::Keycode;
-use std::{ffi::OsStr, path::PathBuf};
+use std::{collections::HashSet, ffi::OsStr, path::PathBuf};
 
 fn size(width: u32, height: u32) -> Size {
     Size { width, height }
@@ -208,7 +209,114 @@ fn fit_preserves_aspect_and_letterboxes() {
 }
 
 #[test]
-fn windowing_precedes_bilinear_resampling() {
+fn area_downsample_averages_every_pixel_in_a_four_by_four_block() {
+    for position in 0..16 {
+        let mut samples = vec![0; 16];
+        samples[position] = 240;
+        let image = gray(4, 4, samples);
+        assert_eq!(
+            view::render(&image, &View::default(), size(1, 1)).unwrap(),
+            [15; 3],
+            "source pixel {position} must contribute equally"
+        );
+    }
+}
+
+#[test]
+fn area_downsample_weights_fractional_footprints_and_clips_image_edges() {
+    for (width, height, viewport) in [(5, 1, size(2, 1)), (1, 5, size(1, 2))] {
+        let image = gray(width, height, vec![0, 0, 100, 200, 200]);
+        assert_eq!(
+            view::render(&image, &View::default(), viewport).unwrap(),
+            [20, 20, 20, 180, 180, 180]
+        );
+    }
+    let image = gray(5, 5, (0..25).map(|i| (i % 5) * 40 + (i / 5) * 4).collect());
+    assert_eq!(
+        view::render(&image, &View::default(), size(2, 2)).unwrap(),
+        [35, 35, 35, 131, 131, 131, 45, 45, 45, 141, 141, 141]
+    );
+}
+
+#[test]
+fn area_downsample_preserves_letterboxing_without_darkening_image_edges() {
+    for (width, height) in [(5, 3), (3, 5)] {
+        let image = gray(width, height, vec![77; 15]);
+        let frame = view::render(&image, &View::default(), size(3, 3)).unwrap();
+        for y in 0..3 {
+            for x in 0..3 {
+                let inside = if width > height { y == 1 } else { x == 1 };
+                let expected = if inside { 77 } else { 0 };
+                let offset = (y * 3 + x) * 3;
+                assert_eq!(&frame[offset..offset + 3], &[expected; 3]);
+            }
+        }
+    }
+}
+
+#[test]
+fn area_downsample_averages_premultiplied_color_over_the_whole_footprint() {
+    let pixels = ImageBuffer::from_fn(4, 4, |x, y| {
+        if (1..=2).contains(&x) && (1..=2).contains(&y) {
+            Rgba([255, 0, 0, 0])
+        } else {
+            Rgba([0, 64, 255, 128])
+        }
+    });
+    let image = LoadedImage::new(DynamicImage::ImageRgba8(pixels)).unwrap();
+    assert_eq!(
+        view::render(&image, &View::default(), size(1, 1)).unwrap(),
+        [0, 24, 96]
+    );
+    assert_eq!(
+        view::render_with_downsample(
+            &image,
+            &View::default(),
+            size(1, 1),
+            DownsampleFilter::Bilinear
+        )
+        .unwrap(),
+        [0; 3]
+    );
+}
+
+#[test]
+fn area_downsample_preserves_all_fractional_windows_before_averaging() {
+    let samples: Vec<u16> = (0..=65535).collect();
+    let image = gray(256, 256, samples.clone());
+    for divisions in [4, 5] {
+        for tick in 0..=8 * divisions {
+            let shift = f64::from(tick) / f64::from(divisions);
+            let view = View {
+                shift,
+                ..View::default()
+            };
+            let frame = view::render(&image, &view, size(64, 64)).unwrap();
+            for y in 0..64 {
+                for x in 0..64 {
+                    let mut sum = 0u32;
+                    for dy in 0..4 {
+                        for dx in 0..4 {
+                            let sample = samples[(y * 4 + dy) * 256 + x * 4 + dx];
+                            sum += (f64::from(sample) / shift.exp2()).floor().min(255.0) as u32;
+                        }
+                    }
+                    let expected = ((sum + 8) / 16) as u8;
+                    let offset = (y * 64 + x) * 3;
+                    assert_eq!(
+                        &frame[offset..offset + 3],
+                        &[expected; 3],
+                        "pixel ({x}, {y}), shift {shift}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(image.image.as_luma16().unwrap().as_raw(), &samples);
+}
+
+#[test]
+fn windowing_precedes_spatial_resampling() {
     let image = gray(2, 2, vec![0, 0, 0, 65535]);
     assert_eq!(
         view::render(&image, &View::default(), size(1, 1)).unwrap(),
@@ -217,6 +325,181 @@ fn windowing_precedes_bilinear_resampling() {
     let image = gray(2, 2, vec![0, 64, 128, 255]);
     let frame = view::render(&image, &View::default(), size(3, 3)).unwrap();
     assert_eq!(&frame[12..15], &[112; 3]);
+}
+
+#[test]
+fn bilinear_downsample_retains_the_original_four_pixel_interpolation() {
+    let image = gray(5, 1, vec![0, 0, 100, 200, 200]);
+    assert_eq!(
+        view::render_with_downsample(
+            &image,
+            &View::default(),
+            size(2, 1),
+            DownsampleFilter::Bilinear
+        )
+        .unwrap(),
+        [0, 0, 0, 200, 200, 200]
+    );
+    let image = gray(4, 4, (0..16).map(|n| n * 16).collect());
+    assert_eq!(
+        view::render_with_downsample(
+            &image,
+            &View::default(),
+            size(1, 1),
+            DownsampleFilter::Bilinear
+        )
+        .unwrap(),
+        [120; 3]
+    );
+}
+
+#[test]
+fn point_downsample_selects_the_requested_source_pixel_before_windowing() {
+    let image = gray(8, 8, (0..64).map(|n| n * 1001).collect());
+    for (filter, dx, dy) in [
+        (DownsampleFilter::Middle, 2, 2),
+        (DownsampleFilter::Ne, 3, 0),
+        (DownsampleFilter::Nw, 0, 0),
+        (DownsampleFilter::Se, 3, 3),
+        (DownsampleFilter::Sw, 0, 3),
+    ] {
+        for shift in [0.0, 3.8, 7.75, 8.0] {
+            let view = View {
+                shift,
+                ..View::default()
+            };
+            let frame = view::render_with_downsample(&image, &view, size(2, 2), filter).unwrap();
+            for y in 0..2 {
+                for x in 0..2 {
+                    let sample = ((y * 4 + dy) * 8 + x * 4 + dx) * 1001;
+                    let expected = (f64::from(sample) / shift.exp2()).floor().min(255.0) as u8;
+                    let offset = ((y * 2 + x) * 3) as usize;
+                    assert_eq!(
+                        &frame[offset..offset + 3],
+                        &[expected; 3],
+                        "{filter:?}/{shift}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn point_downsample_handles_fractional_footprints_and_single_source_axes() {
+    for (filter, horizontal, vertical) in [
+        (DownsampleFilter::Middle, [40, 160], [40, 160]),
+        (DownsampleFilter::Ne, [90, 250], [10, 90]),
+        (DownsampleFilter::Nw, [10, 90], [10, 90]),
+        (DownsampleFilter::Se, [90, 250], [90, 250]),
+        (DownsampleFilter::Sw, [10, 90], [90, 250]),
+    ] {
+        for (width, height, viewport, expected) in
+            [(5, 1, size(2, 1), horizontal), (1, 5, size(1, 2), vertical)]
+        {
+            let image = gray(width, height, vec![10, 40, 90, 160, 250]);
+            assert_eq!(
+                view::render_with_downsample(&image, &View::default(), viewport, filter).unwrap(),
+                expected
+                    .into_iter()
+                    .flat_map(|value| [value; 3])
+                    .collect::<Vec<_>>(),
+                "{filter:?}/{width}x{height}"
+            );
+        }
+    }
+}
+
+#[test]
+fn random_downsample_is_repeatable_and_preserves_fractional_source_precision() {
+    let samples = (0..128 * 128)
+        .map(|n| ((n / 128 % 4) * 4 + n % 4) * 4109)
+        .collect();
+    let image = gray(128, 128, samples);
+    let mut view = View::new(&image.info);
+    let viewport = size(32, 32);
+    let frame =
+        view::render_with_downsample(&image, &view, viewport, DownsampleFilter::Random).unwrap();
+    assert_eq!(
+        frame,
+        view::render_with_downsample(&image, &view, viewport, DownsampleFilter::Random).unwrap()
+    );
+    let observed: HashSet<_> = frame
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|pixel| pixel[0])
+        .collect();
+    assert_eq!(observed, (0..16).map(|n| n * 16).collect());
+    view.shift = 7.8;
+    let brighter =
+        view::render_with_downsample(&image, &view, viewport, DownsampleFilter::Random).unwrap();
+    for (before, after) in frame
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(brighter.as_chunks::<3>().0)
+    {
+        let source = u32::from(before[0] / 16) * 4109;
+        let expected = (f64::from(source) / view.shift.exp2()).floor().min(255.0) as u8;
+        assert_eq!(after, &[expected; 3]);
+    }
+}
+
+#[test]
+fn all_downsample_filters_composite_alpha_over_black() {
+    for (alpha, expected) in [(0, [0; 3]), (128, [128, 64, 32]), (255, [255, 128, 64])] {
+        let image = LoadedImage::new(DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+            4,
+            4,
+            Rgba([255, 128, 64, alpha]),
+        )))
+        .unwrap();
+        for &filter in DownsampleFilter::value_variants() {
+            assert_eq!(
+                view::render_with_downsample(&image, &View::default(), size(1, 1), filter).unwrap(),
+                expected,
+                "{filter:?}/{alpha}"
+            );
+        }
+    }
+}
+
+#[test]
+fn downsample_filter_does_not_change_native_pixels_or_enlargement() {
+    let gray = gray(5, 3, (0..15).map(|n| n * 4096).collect());
+    let color = LoadedImage::new(DynamicImage::ImageRgba8(ImageBuffer::from_fn(
+        5,
+        3,
+        |x, y| Rgba([(x * 50) as u8, (y * 80) as u8, 255, (x * 50) as u8]),
+    )))
+    .unwrap();
+    for image in [&gray, &color] {
+        for (mode, viewport) in [
+            (Mode::Native, size(2, 2)),
+            (Mode::Native, size(8, 8)),
+            (Mode::Fit, size(5, 3)),
+            (Mode::Fit, size(9, 7)),
+        ] {
+            let view = View {
+                mode,
+                shift: 3.8,
+                pan_x: 1,
+                pan_y: -1,
+                ..View::default()
+            };
+            let expected =
+                view::render_with_downsample(image, &view, viewport, DownsampleFilter::Bilinear)
+                    .unwrap();
+            for &filter in DownsampleFilter::value_variants() {
+                assert_eq!(
+                    view::render_with_downsample(image, &view, viewport, filter).unwrap(),
+                    expected,
+                    "{filter:?}/{mode:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

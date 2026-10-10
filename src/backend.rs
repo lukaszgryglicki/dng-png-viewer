@@ -3,7 +3,7 @@ use crate::{
     images::{Inspection, LoadedImage},
     loader::ImageLoader,
     signals::StopSignals,
-    view::{self, Effect, Key, Mode, Size, View},
+    view::{self, DownsampleFilter, Effect, Key, Mode, Size, View},
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use sdl2::{
@@ -141,6 +141,15 @@ fn window_label(shift: f64) -> String {
 }
 
 pub fn run(paths: Vec<PathBuf>, preload: usize, brightness_step: f64) -> Result<()> {
+    run_with_downsample(paths, preload, brightness_step, DownsampleFilter::default())
+}
+
+pub fn run_with_downsample(
+    paths: Vec<PathBuf>,
+    preload: usize,
+    brightness_step: f64,
+    downsample: DownsampleFilter,
+) -> Result<()> {
     ensure!(!paths.is_empty(), "cannot view an empty playlist");
     ensure!(
         brightness_step.is_finite() && brightness_step > 0.0 && brightness_step <= 8.0,
@@ -158,7 +167,14 @@ pub fn run(paths: Vec<PathBuf>, preload: usize, brightness_step: f64) -> Result<
     );
     let mut console = Console::open(&driver)?;
     // All SDL objects must be destroyed before the guard can release a pending VT switch.
-    let result = run_sdl(paths, preload, brightness_step, console.as_mut(), &shutdown);
+    let result = run_sdl(
+        paths,
+        preload,
+        brightness_step,
+        downsample,
+        console.as_mut(),
+        &shutdown,
+    );
     match console {
         Some(console) => console.finish(result),
         None => result,
@@ -169,6 +185,7 @@ fn run_sdl(
     paths: Vec<PathBuf>,
     preload: usize,
     brightness_step: f64,
+    downsample: DownsampleFilter,
     mut console: Option<&mut Console>,
     shutdown: &StopSignals,
 ) -> Result<()> {
@@ -381,7 +398,7 @@ fn run_sdl(
         }
         if render {
             base = if let Some(loaded) = &image {
-                view::render(loaded, &view, size)?
+                view::render_with_downsample(loaded, &view, size, downsample)?
             } else {
                 vec![0; size.frame_bytes()?]
             };
@@ -437,6 +454,7 @@ mod tests {
             vec![image.into()],
             3,
             view::DEFAULT_BRIGHTNESS_STEP,
+            DownsampleFilter::default(),
             Some(&mut console),
             &shutdown,
         );

@@ -416,6 +416,72 @@ def preserved_windows(binary, root, display, display_name, gray, normal, broken)
           flush=True)
 
 
+def downsampling(binary, root, display, display_name):
+    width, height = WIDTH * 4, HEIGHT * 4
+    samples = [65535] + [n * 4096 for n in range(1, 16)]
+    encoded = png_bytes(width, height, 16, 0,
+                        (struct.pack(">4H", *samples[(y % 4) * 4:(y % 4 + 1) * 4]) * WIDTH
+                         for y in range(height)))
+    paths = [root / "downsample.png", root / "downsample-copy.png"]
+    for path in paths:
+        path.write_bytes(encoded)
+    originals = {path: fingerprint(path) for path in paths}
+    probes = [(x, y) for x in range(100, 104) for y in range(100, 104)]
+    for args, filtered in [
+        ([], range(16)),
+        (["-downsample", "area"], range(16)),
+        (["--downsample=full"], range(16)),
+        (["--downsample=bilinear"], (5, 6, 9, 10)),
+        (["-downsample", "random"], None),
+        (["--downsample=middle"], (10,)),
+        (["-downsample", "NE"], (3,)),
+        (["-downsample", "NW"], (0,)),
+        (["-downsample", "SE"], (15,)),
+        (["-downsample", "SW"], (12,)),
+    ]:
+        with viewer(binary, [*args, *paths], root, display_name, "downsampling.log") as process:
+            window = loaded_window(display, process, f"FIT | Gray16 {width}x{height}")
+            if filtered is None:
+                palette = {min(value // 256, 255) * 0x010101: i for i, value in enumerate(samples)}
+                assert len(palette) == 16
+
+                def random_picks():
+                    frame = display.pixels(window)
+                    colors = [frame[y * WIDTH + x] & 0xFFFFFF for x, y in probes]
+                    return [palette[color] for color in colors] if all(color in palette for color in colors) else None
+
+                picked = wait_for(random_picks, "one actual source sample per random output pixel")
+            for shift in (8, 7.8):
+                if shift != 8:
+                    display.keys(window, ["Up"])
+                    wait_title(display, window, "window 7.8-15.8")
+                values = [min(int(value / (2 ** shift)), 255) for value in samples]
+                if filtered is None:
+                    expected = [(x, y, values[i] * 0x010101) for (x, y), i in zip(probes, picked)]
+                else:
+                    mean = (sum(values[i] for i in filtered) + len(filtered) // 2) // len(filtered)
+                    expected = [(x, y, mean * 0x010101) for x, y in probes]
+                frame_matches(display, window, expected)
+            display.keys(window, ["z"])
+            wait_title(display, window, "1:1 |")
+            frame_matches(display, window,
+                          [(x, y, values[(y % 4) * 4 + x % 4] * 0x010101) for x, y in probes])
+            display.keys(window, ["x", "Right"])
+            wait_title(display, window, "| 2/2 |")
+            wait_title(display, window, "window 7.8-15.8")
+            frame_matches(display, window, expected)
+            display.keys(window, ["Left"])
+            wait_title(display, window, "| 1/2 |")
+            wait_title(display, window, "window 7.8-15.8")
+            frame_matches(display, window, expected)
+            display.keys(window, ["Escape"])
+            assert process.wait(timeout=5) == 0
+    for path, before in originals.items():
+        assert fingerprint(path) == before, f"Input changed: {path}"
+    print("PASS: all downsample filters and full alias; stable random pixels, fractional DR, 1:1 and navigation",
+          flush=True)
+
+
 def exercise(binary, test_binary, root, display, display_name):
     gray = root / "all-codes.png"
     gray.write_bytes(png_bytes(256, 256, 16, 0,
@@ -534,6 +600,7 @@ def exercise(binary, test_binary, root, display, display_name):
         assert process.wait(timeout=5) == 0, "An unvisited preload failure must not fail the current image"
 
     preserved_windows(binary, root, display, display_name, gray, normal, broken)
+    downsampling(binary, root, display, display_name)
 
     for path, before in originals.items():
         assert fingerprint(path) == before, f"Input changed: {path}"

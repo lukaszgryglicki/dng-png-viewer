@@ -102,7 +102,17 @@ when both images have the same available DR range, even across different formats
 or dimensions. A different range, ordinary image or decode error resets it to the
 next image's default; the first image starts at its full-range window. Native 1:1
 uses integer pixel alignment, including odd image/display dimensions. Fit mode
-preserves aspect ratio with bilinear scaling and black borders.
+preserves aspect ratio and black borders. Shrinking uses **area-weighted
+averaging** of all covered source pixels: a 4:1 reduction averages the full 4x4
+block, reducing noise and aliasing. `-downsample bilinear` restores the previous
+four-pixel interpolation. Native 1:1 and bilinear enlargement are unchanged.
+
+`-downsample full` is an alias for `area`. For single-pixel sampling, choose
+`random`, `middle`, `NE`, `NW`, `SE` or `SW` (names are case-insensitive).
+Middle selects the pixel containing the source footprint's center; the corners
+select its first/last overlapping source rows and columns. Random uses a
+repeatable selection of contributing pixels so brightness changes do not
+reshuffle the samples. These modes retain more noise/aliasing than averaging.
 
 ## What the DR window means
 
@@ -121,8 +131,9 @@ display = min(floor(sample / 2^s), 255)
 Samples below `2^s` become black; values reaching/exceeding the selected window's
 top become white. Highlights saturate rather than wrapping. There is no automatic
 black subtraction, histogram stretch, gamma transformation or dithering.
-Windowing happens **before** spatial interpolation, not after converting the
-source to 8 bits.
+Windowing happens **before** spatial averaging/interpolation, using the original
+16-bit samples for every selected window. Downsampling does not change the
+fractional brightness controls or apply a different tone/gamma curve.
 
 The shift range is `0 .. max(code_bits - 8, 0)`, inclusive, with a default
 step of **0.2 bits**:
@@ -187,6 +198,7 @@ Both single and double dashes work, including `-dir=/photos` and `--dir /photos`
 | `-shuffle` | Shuffle the entire merged, deduplicated playlist |
 | `-preload N` | Background-decode up to N images on each side; default 3, 0 disables preloading |
 | `-brightness-step BITS` | DR adjustment per Up/Down keypress; default 0.2, valid range greater than 0 through 8 |
+| `-downsample FILTER` | Shrinking filter: `area`/`full` (default average), `bilinear` (previous behavior), or one `random`, `middle`, `NE`, `NW`, `SE`, `SW` pixel |
 | `-analyze` | Print one JSON object per image without opening a display |
 | `-help`, `-h` | Help and controls |
 | `-version`, `-V` | Program version |

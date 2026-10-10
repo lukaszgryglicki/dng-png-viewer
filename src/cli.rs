@@ -1,7 +1,7 @@
 use crate::{
     backend,
     images::{self, Source},
-    view::DEFAULT_BRIGHTNESS_STEP,
+    view::{DEFAULT_BRIGHTNESS_STEP, DownsampleFilter},
 };
 use anyhow::{Result, ensure};
 use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser};
@@ -52,6 +52,15 @@ pub struct Cli {
         help = "Positive brightness-window step in bits (up to 8)"
     )]
     pub brightness_step: f64,
+    #[arg(
+        long,
+        value_enum,
+        ignore_case = true,
+        default_value = "area",
+        value_name = "FILTER",
+        help = "Shrinking filter: area/full average, legacy bilinear, or random/middle/corner pixel"
+    )]
+    pub downsample: DownsampleFilter,
     #[arg(skip)]
     pub sources: Vec<Source>,
 }
@@ -79,6 +88,7 @@ impl Cli {
                 "analyze",
                 "preload",
                 "brightness-step",
+                "downsample",
                 "help",
                 "version",
             ];
@@ -86,7 +96,8 @@ impl Cli {
                 let single = format!("-{name}");
                 let double = format!("--{name}");
                 let separate = bytes == single.as_bytes() || bytes == double.as_bytes();
-                if separate && matches!(name, "dir" | "preload" | "brightness-step") {
+                if separate && matches!(name, "dir" | "preload" | "brightness-step" | "downsample")
+                {
                     value_next = true;
                 }
                 if bytes == single.as_bytes() || bytes.starts_with(format!("{single}=").as_bytes())
@@ -149,7 +160,7 @@ impl Cli {
             ensure!(errors == 0, "{errors} image(s) could not be inspected");
             return Ok(());
         }
-        backend::run(paths, self.preload, self.brightness_step)
+        backend::run_with_downsample(paths, self.preload, self.brightness_step, self.downsample)
     }
 }
 

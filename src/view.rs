@@ -30,6 +30,20 @@ pub enum Mode {
     Native,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DownsampleFilter {
+    #[default]
+    #[value(alias = "full")]
+    Area,
+    Bilinear,
+    Random,
+    Middle,
+    Ne,
+    Nw,
+    Se,
+    Sw,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Left,
@@ -177,17 +191,26 @@ impl View {
 }
 
 pub fn render(image: &LoadedImage, view: &View, size: Size) -> Result<Vec<u8>> {
+    render_with_downsample(image, view, size, DownsampleFilter::default())
+}
+
+pub fn render_with_downsample(
+    image: &LoadedImage,
+    view: &View,
+    size: Size,
+    downsample: DownsampleFilter,
+) -> Result<Vec<u8>> {
     let window = GrayWindow::new(view.shift)?;
     let mut frame = vec![0; size.frame_bytes()?];
     let layout = view.layout(image.size(), size);
     match &image.image {
-        DynamicImage::ImageLuma16(pixels) => draw(&mut frame, size, layout, |x, y| {
+        DynamicImage::ImageLuma16(pixels) => draw(&mut frame, size, layout, downsample, |x, y| {
             let value = window.sample(pixels.get_pixel(x, y).0[0]);
             [value, value, value, 255]
         }),
-        DynamicImage::ImageRgba8(pixels) => {
-            draw(&mut frame, size, layout, |x, y| pixels.get_pixel(x, y).0)
-        }
+        DynamicImage::ImageRgba8(pixels) => draw(&mut frame, size, layout, downsample, |x, y| {
+            pixels.get_pixel(x, y).0
+        }),
         _ => anyhow::bail!("image was not prepared for display"),
     }
     Ok(frame)
@@ -197,8 +220,13 @@ fn draw<F: Fn(u32, u32) -> [u8; 4] + Sync>(
     frame: &mut [u8],
     size: Size,
     layout: Layout,
+    downsample: DownsampleFilter,
     sample: F,
 ) {
+    if downsample != DownsampleFilter::Bilinear && layout.scale < 1.0 {
+        draw_downsample(frame, size, layout, downsample, sample);
+        return;
+    }
     let right = layout.left + f64::from(layout.image.width) * layout.scale;
     let bottom = layout.top + f64::from(layout.image.height) * layout.scale;
     frame
@@ -245,6 +273,81 @@ fn draw<F: Fn(u32, u32) -> [u8; 4] + Sync>(
                         })
                         .sum();
                     out[channel] = value.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        });
+}
+
+fn draw_downsample<F: Fn(u32, u32) -> [u8; 4] + Sync>(
+    frame: &mut [u8],
+    size: Size,
+    layout: Layout,
+    downsample: DownsampleFilter,
+    sample: F,
+) {
+    let right = layout.left + f64::from(layout.image.width) * layout.scale;
+    let bottom = layout.top + f64::from(layout.image.height) * layout.scale;
+    frame
+        .par_chunks_mut(size.width as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let cy = y as f64 + 0.5;
+            if cy < layout.top || cy >= bottom {
+                return;
+            }
+            let top = ((y as f64 - layout.top) / layout.scale).max(0.0);
+            let bottom =
+                ((y as f64 + 1.0 - layout.top) / layout.scale).min(f64::from(layout.image.height));
+            let y0 = top.floor() as u32;
+            let y1 = bottom.ceil() as u32;
+            let mut random = fastrand::Rng::with_seed(y as u64);
+            for (x, out) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                let cx = x as f64 + 0.5;
+                if cx < layout.left || cx >= right {
+                    continue;
+                }
+                let left = ((x as f64 - layout.left) / layout.scale).max(0.0);
+                let right = ((x as f64 + 1.0 - layout.left) / layout.scale)
+                    .min(f64::from(layout.image.width));
+                let x0 = left.floor() as u32;
+                let x1 = right.ceil() as u32;
+                let (sx, sy) = match downsample {
+                    DownsampleFilter::Area => {
+                        let mut sums = [0.0; 3];
+                        for sy in y0..y1 {
+                            let wy = bottom.min(f64::from(sy) + 1.0) - top.max(f64::from(sy));
+                            for sx in x0..x1 {
+                                let wx = right.min(f64::from(sx) + 1.0) - left.max(f64::from(sx));
+                                let pixel = sample(sx, sy);
+                                let weight = wx * wy * (f64::from(pixel[3]) / 255.0);
+                                for channel in 0..3 {
+                                    sums[channel] += f64::from(pixel[channel]) * weight;
+                                }
+                            }
+                        }
+                        let area = (right - left) * (bottom - top);
+                        for channel in 0..3 {
+                            out[channel] = (sums[channel] / area).round().clamp(0.0, 255.0) as u8;
+                        }
+                        continue;
+                    }
+                    DownsampleFilter::Random => (random.u32(x0..x1), random.u32(y0..y1)),
+                    DownsampleFilter::Middle => (
+                        ((left + right) / 2.0).floor() as u32,
+                        ((top + bottom) / 2.0).floor() as u32,
+                    ),
+                    DownsampleFilter::Ne => (x1 - 1, y0),
+                    DownsampleFilter::Nw => (x0, y0),
+                    DownsampleFilter::Se => (x1 - 1, y1 - 1),
+                    DownsampleFilter::Sw => (x0, y1 - 1),
+                    DownsampleFilter::Bilinear => {
+                        unreachable!("bilinear uses the interpolation path")
+                    }
+                };
+                let pixel = sample(sx, sy);
+                for channel in 0..3 {
+                    out[channel] =
+                        (f64::from(pixel[channel]) * (f64::from(pixel[3]) / 255.0)).round() as u8;
                 }
             }
         });

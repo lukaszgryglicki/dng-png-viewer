@@ -1,5 +1,5 @@
 use clap::error::ErrorKind;
-use dng_png_viewer::{cli::Cli, images::Source};
+use dng_png_viewer::{cli::Cli, images::Source, view::DownsampleFilter};
 use std::{collections::HashSet, ffi::OsString, fs, path::PathBuf, process::Command};
 use tempfile::tempdir;
 
@@ -23,12 +23,14 @@ fn every_option_accepts_single_and_double_dash_forms() {
             &format!("{prefix}preload"),
             "5",
             &format!("{prefix}brightness-step=0.5"),
+            &format!("{prefix}downsample=bilinear"),
             "a.png",
         ])
         .unwrap();
         assert!(cli.shuffle && cli.analyze);
         assert_eq!(cli.preload, 5);
         assert_eq!(cli.brightness_step, 0.5);
+        assert_eq!(cli.downsample, DownsampleFilter::Bilinear);
         assert_eq!(
             cli.sources,
             vec![
@@ -83,6 +85,47 @@ fn preload_and_brightness_defaults_and_custom_values() {
     );
     let cli = parse(&["-dir", "-brightness-step", "a.png"]).unwrap_err();
     assert_eq!(cli.kind(), ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn downsample_defaults_to_area_and_accepts_all_filters_and_dash_forms() {
+    assert_eq!(
+        parse(&["a.png"]).unwrap().downsample,
+        DownsampleFilter::Area
+    );
+    for prefix in ["-", "--"] {
+        for (value, filter) in [
+            ("area", DownsampleFilter::Area),
+            ("full", DownsampleFilter::Area),
+            ("bilinear", DownsampleFilter::Bilinear),
+            ("random", DownsampleFilter::Random),
+            ("middle", DownsampleFilter::Middle),
+            ("ne", DownsampleFilter::Ne),
+            ("nw", DownsampleFilter::Nw),
+            ("se", DownsampleFilter::Se),
+            ("sw", DownsampleFilter::Sw),
+        ] {
+            for value in [value.to_owned(), value.to_uppercase()] {
+                for args in [
+                    vec![format!("{prefix}downsample"), value.clone(), "a.png".into()],
+                    vec!["a.png".into(), format!("{prefix}downsample={value}")],
+                ] {
+                    let args: Vec<_> = args.iter().map(String::as_str).collect();
+                    assert_eq!(parse(&args).unwrap().downsample, filter);
+                }
+            }
+        }
+    }
+    let cli = parse(&["--", "-downsample", "--downsample=bilinear"]).unwrap();
+    assert_eq!(cli.downsample, DownsampleFilter::Area);
+    assert_eq!(
+        cli.images,
+        vec![PathBuf::from("-downsample"), "--downsample=bilinear".into()]
+    );
+    for prefix in ["-", "--"] {
+        let error = parse(&[&format!("{prefix}downsample"), "-help", "a.png"]).unwrap_err();
+        assert_ne!(error.kind(), ErrorKind::DisplayHelp);
+    }
 }
 
 #[test]
@@ -144,6 +187,10 @@ fn invalid_options_missing_sources_and_player_options_fail() {
         vec!["--brightness-step=inf", "a.png"],
         vec!["--brightness-step=8.1", "a.png"],
         vec!["--brightness-step=bogus", "a.png"],
+        vec!["-downsample"],
+        vec!["--downsample=nearest", "a.png"],
+        vec!["--downsample=", "a.png"],
+        vec!["--downsample=area"],
     ] {
         assert!(parse(&args).is_err(), "{args:?}");
     }
@@ -206,7 +253,7 @@ fn analyze_runs_headlessly_without_a_player_or_a_valid_video_driver() {
         .write_image_data(&[0, 0, 15, 255])
         .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dng-png-viewer"))
-        .args(["-analyze", "-dir"])
+        .args(["-analyze", "-downsample", "bilinear", "-dir"])
         .arg(dir.path())
         .env("PATH", "")
         .env("SDL_VIDEODRIVER", "not-a-driver")

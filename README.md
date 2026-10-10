@@ -17,23 +17,33 @@ Requires Rust 1.89+, C/C++ compilers, CMake 3.22+, `pkg-config`, and SDL2, libde
 libaom development files. The codec tests also need x265 to generate HEIC fixtures.
 
 ```sh
-# FreeBSD
-sudo pkg install sdl2 pkgconf cmake libde265 aom x265
-
-# Debian/Ubuntu
-sudo apt install build-essential cmake pkg-config libsdl2-dev libde265-dev libaom-dev libx265-dev aom-tools libnuma-dev
-
-# macOS (Xcode Command Line Tools and Homebrew)
-brew install cmake pkgconf sdl2 libde265 aom x265
+make requirements     # install/check native and SDL2-static build prerequisites
+make install          # build both; copy both to repo root, static to /data/scripts
 
 make                  # tests and stripped release build
 make release          # target/release/dng-png-viewer
 make debug            # target/debug/dng-png-viewer
 make static           # target/static/release/dng-png-viewer (embeds SDL2)
-make install          # build both; copy both to repo root, static to /data/scripts
 make test
 make lint             # formatting and strict Clippy
 ```
+
+Run setup as your ordinary user, not `sudo make`. It uses `sudo` for system
+packages on FreeBSD and Debian/Ubuntu, Homebrew on macOS, or `apk` on Alpine.
+On macOS, first install the Xcode Command Line Tools
+(`xcode-select --install`) and [Homebrew](https://brew.sh/). Setup retains
+working Rust 1.89+ installations and installs missing Rust through the native
+package manager or rustup.
+
+`make requirements` includes SDL2, CMake, pkg-config, the native codecs, and the
+graphics development dependencies needed by bundled SDL2. Ubuntu's `aom-tools`
+and `libnuma-dev`, and Alpine's `numactl-dev`, are included too. The viewer's
+Linux `make static` embeds SDL2 using the **native GNU toolchain**: it does not
+need musl, a separate C++ SDK, Docker or another container runtime.
+
+Builds check prerequisites before compiling or refreshing native caches. If
+anything is missing, they name it and request `make requirements`; ordinary
+`make install` never installs system packages automatically.
 
 Build/test parallelism defaults to four jobs/threads; override with `JOBS=...`
 and `TEST_THREADS=...`. Runtime pixel processing uses available CPU threads;
@@ -44,6 +54,8 @@ and `TEST_THREADS=...`. Runtime pixel processing uses available CPU threads;
 that static executable to `/data/scripts/dng-png-viewer`. Override the latter
 directory with `INSTALL_DIR=/your/path`; it must be writable by the invoking
 user. Both repository-root executables are ignored by Git.
+On macOS without a writable `/data/scripts`, for example, use
+`make install INSTALL_DIR="$HOME/bin"`.
 
 `make release static install clean` performs the complete sequence. `make clean`
 removes Cargo build artifacts but preserves both repository-root executables

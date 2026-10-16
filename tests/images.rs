@@ -28,6 +28,119 @@ fn gray(samples: &[u16]) -> LoadedImage {
 }
 
 #[test]
+fn standard_image_dr_uses_eight_bit_luminance_without_changing_pixels_or_controls() {
+    let dir = tempdir().unwrap();
+    let mut random = fastrand::Rng::with_seed(4107);
+    let samples: Vec<u8> = (0usize..256 * 128)
+        .map(|index| (20 + (index % 256 / 16) as i32 * 12 + random.i32(-7..=7)) as u8)
+        .collect();
+    let gray = DynamicImage::ImageLuma8(ImageBuffer::from_vec(256, 128, samples.clone()).unwrap());
+    let rgb = DynamicImage::ImageRgb8(ImageBuffer::from_fn(256, 128, |x, y| {
+        Rgb([samples[(y * 256 + x) as usize]; 3])
+    }));
+    let colorful = DynamicImage::ImageRgb8(ImageBuffer::from_fn(256, 128, |x, y| {
+        let value = samples[(y * 256 + x) as usize];
+        Rgb([value, value.saturating_add(31), value.saturating_sub(17)])
+    }));
+    let luminance = DynamicImage::ImageLuma8(ImageBuffer::from_fn(256, 128, |x, y| {
+        let [r, g, b] = colorful.as_rgb8().unwrap().get_pixel(x, y).0.map(u32::from);
+        Luma([((2126 * r + 7152 * g + 722 * b) / 10000) as u8])
+    }));
+    let mut reference = None;
+    for (name, image) in [
+        ("gray.png", gray),
+        ("color.png", rgb.clone()),
+        ("color.jpg", rgb),
+        ("luminance.png", luminance),
+        ("colorful.png", colorful),
+    ] {
+        let path = dir.path().join(name);
+        image.save(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+        let plain = images::decode(&path).unwrap();
+        let measured = images::decode_with_dr(&path, true).unwrap();
+        assert!(matches!(measured.info, Inspection::Standard { .. }));
+        assert_eq!(measured.info, plain.info);
+        assert_eq!(measured.image.as_rgba8(), plain.image.as_rgba8());
+        assert!(plain.dynamic_range.is_none());
+        let dr = measured.dynamic_range.unwrap();
+        assert!(
+            dr.snr1_stops
+                .is_some_and(|value| value > 0.0 && value <= 255f64.log2())
+        );
+        let value = serde_json::to_value(dr).unwrap();
+        if matches!(name, "gray.png" | "luminance.png") {
+            reference = Some(value);
+        } else if matches!(name, "color.png" | "colorful.png") {
+            assert_eq!(Some(value), reference);
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn standard_image_dr_accounts_for_alpha_and_matches_the_existing_eight_bit_display() {
+    let dir = tempdir().unwrap();
+    let mut random = fastrand::Rng::with_seed(4108);
+    let samples: Vec<u8> = (0usize..256 * 128)
+        .map(|index| (30 + (index % 256 / 16) as i32 * 12 + random.i32(-7..=7)) as u8)
+        .collect();
+    for alpha in [0u8, 128, 255] {
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(256, 128, |x, y| {
+            let value = samples[(y * 256 + x) as usize];
+            Rgba([value, value, value, alpha])
+        }));
+        let path = dir.path().join(format!("alpha-{alpha}.png"));
+        image.save(&path).unwrap();
+        let reference = dir.path().join(format!("composited-{alpha}.png"));
+        DynamicImage::ImageLuma8(ImageBuffer::from_fn(256, 128, |x, y| {
+            let value = samples[(y * 256 + x) as usize];
+            Luma([((u16::from(value) * u16::from(alpha) + 127) / 255) as u8])
+        }))
+        .save(&reference)
+        .unwrap();
+        let measured = images::decode_with_dr(&path, true).unwrap();
+        assert_eq!(measured.image.as_rgba8(), image.as_rgba8());
+        assert_eq!(
+            serde_json::to_value(measured.dynamic_range.as_ref().unwrap()).unwrap(),
+            serde_json::to_value(
+                images::decode_with_dr(&reference, true)
+                    .unwrap()
+                    .dynamic_range
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        if alpha == 0 {
+            assert!(measured.dynamic_range.unwrap().snr1_stops.is_none());
+        }
+    }
+    let path = dir.path().join("rgb16.png");
+    DynamicImage::ImageRgb16(ImageBuffer::from_fn(256, 128, |x, y| {
+        let value = u16::from(samples[(y * 256 + x) as usize]) * 257;
+        Rgb([value, value, value])
+    }))
+    .save(&path)
+    .unwrap();
+    let plain = images::decode(&path).unwrap();
+    let reference = dir.path().join("display8.png");
+    plain.image.save(&reference).unwrap();
+    let measured = images::decode_with_dr(&path, true).unwrap();
+    assert_eq!(measured.info, plain.info);
+    assert_eq!(measured.image.as_rgba8(), plain.image.as_rgba8());
+    assert_eq!(
+        serde_json::to_value(measured.dynamic_range.unwrap()).unwrap(),
+        serde_json::to_value(
+            images::decode_with_dr(&reference, true)
+                .unwrap()
+                .dynamic_range
+                .unwrap()
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn every_code_and_window_is_saturating_not_wrapping() {
     for shift in 0..=8 {
         for sample in 0..=u16::MAX {
@@ -309,6 +422,17 @@ fn ordinary_codecs_decode_without_external_programs() {
             "{extension}"
         );
         assert!(loaded.image.as_rgba8().is_some(), "{extension}");
+        let measured = images::decode_with_dr(&path, true).unwrap();
+        assert_eq!(measured.info, loaded.info, "{extension}");
+        assert_eq!(
+            measured.image.as_rgba8(),
+            loaded.image.as_rgba8(),
+            "{extension}"
+        );
+        assert!(
+            measured.dynamic_range.unwrap().snr1_stops.is_none(),
+            "{extension}"
+        );
     }
 }
 

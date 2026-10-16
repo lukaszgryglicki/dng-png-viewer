@@ -325,12 +325,12 @@ impl LoadedImage {
         display_dr: bool,
         calibration: Option<crate::dr::Calibration>,
     ) -> Result<Self> {
-        if !display_dr {
-            return Self::new(image);
-        }
-        let (image, dynamic_range) = crate::dr::estimate(image, calibration)?;
         let mut loaded = Self::new(image)?;
-        loaded.dynamic_range = dynamic_range;
+        if display_dr {
+            let (image, dynamic_range) = crate::dr::estimate(loaded.image, calibration)?;
+            loaded.image = image;
+            loaded.dynamic_range = dynamic_range;
+        }
         Ok(loaded)
     }
 

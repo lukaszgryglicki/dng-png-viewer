@@ -174,7 +174,8 @@ fn headless_dr_defaults_on_supports_opt_out_and_reports_missing_measurements() {
     assert!(output.status.success(), "{:?}", output.stderr);
     let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(record["image"]["mode"], "standard");
-    assert!(record["dynamic_range"].is_null());
+    assert_eq!(record["dynamic_range"]["method"], "unavailable");
+    assert!(record["dynamic_range"]["snr1_stops"].is_null());
     assert_eq!(
         fs::read(image).unwrap(),
         b"P5\n2 1\n65535\n\x80\x00\x80\x00"

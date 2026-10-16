@@ -4,7 +4,7 @@ use dng_png_viewer::{
     images::{Inspection, LoadedImage},
     view::{self, DownsampleFilter, Effect, Key, Mode, Size, View},
 };
-use image::{DynamicImage, ImageBuffer, Rgba};
+use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 use sdl2::keyboard::Keycode;
 use std::{collections::HashSet, ffi::OsStr, path::PathBuf};
 
@@ -877,4 +877,50 @@ fn optional_dr_caption_is_noise_limited_rounded_and_independent_of_the_window() 
     ));
     assert!(backend::title(0, &paths, Some(&image), &view, "").ends_with("| DR unavailable"));
     assert!(!backend::title(0, &paths, None, &view, "Loading...").contains("| DR"));
+}
+
+#[test]
+fn standard_image_caption_shows_numeric_and_unavailable_dr_without_bit_windows() {
+    use dng_monochrome::noise::{DynamicRange, NoiseEstimate};
+
+    let paths = vec![PathBuf::from("photo.jpg")];
+    let mut image = LoadedImage::new(DynamicImage::ImageRgb8(ImageBuffer::from_pixel(
+        1,
+        1,
+        Rgb([30, 50, 70]),
+    )))
+    .unwrap();
+    let mut view = View::new(&image.info);
+    assert!(!backend::title(0, &paths, Some(&image), &view, "").contains("| DR"));
+    image.dynamic_range = Some(DynamicRange::estimate(
+        &NoiseEstimate {
+            dark_sigma_codes: Some(1.0),
+            ..NoiseEstimate::default()
+        },
+        0.0,
+        0.0,
+        6.74_f64.exp2(),
+        true,
+    ));
+    for key in [
+        Key::Up,
+        Key::Down,
+        Key::Native,
+        Key::Reset,
+        Key::Fit,
+        Key::Reset,
+    ] {
+        view.handle(key, &image.info, image.size(), size(100, 100));
+        let title = backend::title(0, &paths, Some(&image), &view, "");
+        assert!(title.ends_with("| DR 6.7"), "{title}");
+        assert!(!title.contains("| window"), "{title}");
+    }
+    image.dynamic_range = Some(DynamicRange::estimate(
+        &NoiseEstimate::default(),
+        0.0,
+        0.0,
+        255.0,
+        true,
+    ));
+    assert!(backend::title(0, &paths, Some(&image), &view, "").ends_with("| DR unavailable"));
 }

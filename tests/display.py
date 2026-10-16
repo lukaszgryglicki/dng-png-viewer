@@ -520,7 +520,37 @@ def measured_dr(binary, root, display, display_name):
         display.keys(window, ["Escape"])
         assert process.wait(timeout=5) == 0
     assert fingerprint(path) == before
-    print("PASS: default numeric DR, opt-out and re-enable match headless analysis and preserve pixels", flush=True)
+    path = root / "noisy-color.png"
+    rows = []
+    for y in range(height):
+        row = bytearray()
+        for x in range(width):
+            state = (state * 1664525 + 1013904223) & 0xFFFFFFFF
+            value = 20 + (x // 16) * 12 + ((state >> 16) % 15) - 7
+            row.extend((value, value + 20, value // 2))
+        rows.append(bytes(row))
+    path.write_bytes(png_bytes(width, height, 8, 2, rows))
+    before = fingerprint(path)
+    result = subprocess.run([str(binary), "-analyze", str(path)],
+                            capture_output=True, check=True,
+                            env={**os.environ, "SDL_VIDEODRIVER": "not-a-driver", "RAYON_NUM_THREADS": "2"})
+    value = json.loads(result.stdout)["dynamic_range"]["snr1_stops"]
+    assert value is not None and 0 < value < 8, value
+    suffix = f"| DR {value:.1f}"
+    with viewer(binary, [path], root, display_name, "measured-color-dr.log") as process:
+        window = loaded_window(display, process, f"standard 256x128 {suffix}")
+        display.keys(window, ["Up", "Down", "space", "z"])
+        wait_title(display, window, f"1:1 | standard 256x128 {suffix}")
+        assert "| window" not in display.title(window)
+        display.keys(window, ["Escape"])
+        assert process.wait(timeout=5) == 0
+    with viewer(binary, ["-no-dr", path], root, display_name, "unmeasured-color-dr.log") as process:
+        window = loaded_window(display, process, "standard 256x128")
+        assert "| DR" not in display.title(window)
+        display.keys(window, ["Escape"])
+        assert process.wait(timeout=5) == 0
+    assert fingerprint(path) == before
+    print("PASS: Gray16/color numeric DR, opt-out and re-enable match headless analysis and preserve pixels", flush=True)
 
 
 def exercise(binary, test_binary, root, display, display_name):

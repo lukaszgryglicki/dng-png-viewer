@@ -230,12 +230,15 @@ default SNR-1 analysis, including clipping strength 3, DNG black/white
 calibration and NoiseProfile. No converter executable or sibling checkout is
 required. The calculation runs once during image loading, is cached with the
 pixels, and does not change when panning or adjusting the display window.
-Insufficient evidence is shown as `DR unavailable`; ordinary color/8-bit
-display images do not receive a DR estimate. For other Gray16 files it
-estimates the stored pixels with a zero black level, not the original DNG's
-DR: clipping, tone curves and compression can change that estimate.
-`-analyze` includes the full `dynamic_range` result in JSON (null for standard
-images); `-no-dr` omits that field.
+Insufficient evidence is shown as `DR unavailable`. Other Gray16 files use their
+stored samples with zero black level. JPEG and other standard-display images
+use 8-bit luminance after compositing transparency over black, without changing
+their displayed pixels or enabling Gray16 window controls. Neither estimate
+reconstructs the original DNG's DR: clipping and tone curves change noise
+statistics even when the final compression is lossless. Low-confidence shadow
+proxies are not measurements of how many original camera stops survived.
+`-analyze` includes the full `dynamic_range` result and its method/confidence
+for every image; `-no-dr` omits that field.
 
 ## Ordinary images and metadata
 
@@ -288,7 +291,7 @@ its argument limit before the program starts.
 | `-dir DIRECTORY` | Recursively add supported image extensions; repeat freely |
 | `-shuffle` | Shuffle once after all inputs are expanded and deduplicated |
 | `-preload N` | Background-decode up to N images on each side; default 5, 0 disables preloading |
-| `-display-dr`, `-dr` | Calculate and display the noise-limited SNR-1 estimate for Gray16 images; default on |
+| `-display-dr`, `-dr` | Calculate and display noise-based DR for every image; default on |
 | `-no-display-dr`, `-no-dr` | Skip noise-limited DR calculation and display |
 | `-brightness-step BITS` | DR adjustment per Up/Down keypress; default 0.2, valid range greater than 0 through 8 |
 | `-downsample FILTER` | Shrinking filter: `area`/`full` (default average), `bilinear` (previous behavior), or one `random`, `middle`, `NE`, `NW`, `SE`, `SW` pixel |

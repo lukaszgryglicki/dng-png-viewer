@@ -4,8 +4,9 @@ use dng_monochrome::{
     range::{self, Histogram, RangeOptions},
     raw::{MonoImage, SensorMetadata},
 };
-use image::{DynamicImage, ImageBuffer};
+use image::{DynamicImage, ImageBuffer, Pixel, Rgb};
 use rawler::{decoders::WellKnownIFD, formats::tiff::Value, rawsource::RawSource, tags::DngTag};
+use rayon::prelude::*;
 use std::path::Path;
 
 pub(crate) struct Calibration {
@@ -82,13 +83,42 @@ pub(crate) fn estimate(
     image: DynamicImage,
     calibration: Option<Calibration>,
 ) -> Result<(DynamicImage, Option<DynamicRange>)> {
-    let DynamicImage::ImageLuma16(pixels) = image else {
-        return Ok((image, None));
+    let (width, height) = (image.width(), image.height());
+    let (pixels, calibration, original) = match image {
+        DynamicImage::ImageLuma16(pixels) => {
+            (pixels.into_raw(), calibration.unwrap_or_default(), None)
+        }
+        image => {
+            ensure!(
+                calibration.is_none(),
+                "DNG DR calibration requires native Gray16 samples"
+            );
+            let pixels = image
+                .as_rgba8()
+                .context("expected standard RGBA8 display pixels for luminance DR")?
+                .as_raw()
+                .par_chunks_exact(4)
+                .map(|pixel| {
+                    let alpha = u16::from(pixel[3]);
+                    let rgb = Rgb(std::array::from_fn(|channel| {
+                        ((u16::from(pixel[channel]) * alpha + 127) / 255) as u8
+                    }));
+                    u16::from(rgb.to_luma().0[0])
+                })
+                .collect();
+            (
+                pixels,
+                Calibration {
+                    black: 0.0,
+                    white: 255,
+                    noise_profile: None,
+                },
+                Some(image),
+            )
+        }
     };
-    let (width, height) = pixels.dimensions();
-    let calibration = calibration.unwrap_or_default();
     let input = MonoImage {
-        pixels: pixels.into_raw(),
+        pixels,
         metadata: SensorMetadata {
             make: String::new(),
             model: String::new(),
@@ -98,7 +128,7 @@ pub(crate) fn estimate(
             height: height as usize,
             crop: [0, 0, width as usize, height as usize],
             orientation: 1,
-            storage_bits: 16,
+            storage_bits: if original.is_some() { 8 } else { 16 },
             black_level: calibration.black,
             white_level: calibration.white,
             iso: None,
@@ -116,7 +146,12 @@ pub(crate) fn estimate(
     let dynamic_range = range::analyze(&input, &histogram, RangeOptions::default())
         .context("estimating noise-limited DR")?
         .dynamic_range;
-    let image = ImageBuffer::from_vec(width, height, input.pixels)
-        .context("restoring grayscale pixels after DR estimation")?;
-    Ok((DynamicImage::ImageLuma16(image), Some(dynamic_range)))
+    let image = match original {
+        Some(image) => image,
+        None => DynamicImage::ImageLuma16(
+            ImageBuffer::from_vec(width, height, input.pixels)
+                .context("restoring grayscale pixels after DR estimation")?,
+        ),
+    };
+    Ok((image, Some(dynamic_range)))
 }

@@ -460,7 +460,7 @@ fn color_linear_and_cfa_dngs_are_developed_without_dr_controls() {
         let pixel = decoded.image.as_rgba8().unwrap().get_pixel(12, 8).0;
         assert!(pixel[0] > pixel[1] && pixel[0] > pixel[2], "{pixel:?}");
         let measured = images::decode_with_dr(&path, true).unwrap();
-        assert!(measured.dynamic_range.is_none());
+        assert!(measured.dynamic_range.unwrap().snr1_stops.is_none());
         assert_eq!(decoded.info, measured.info);
         assert_eq!(decoded.image.as_rgba8(), measured.image.as_rgba8());
 

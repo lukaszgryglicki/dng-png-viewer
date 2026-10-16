@@ -48,7 +48,7 @@ pub struct Cli {
         long,
         visible_alias = "dr",
         overrides_with_all = ["display_dr", "no_display_dr"],
-        help = "Calculate and display noise-limited DR for Gray16 images using dng-monochrome's estimator (default)"
+        help = "Calculate and display noise-based DR for every image using dng-monochrome's estimator (default)"
     )]
     pub display_dr: bool,
     #[arg(

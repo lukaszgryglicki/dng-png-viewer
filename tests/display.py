@@ -332,6 +332,11 @@ def console_input_pipeline(test_binary, image, root, display, display_name):
                     os.write(master, b"X\x1b[Bz")
                     wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 8-16")
                     frame_matches(display, window, gray_region(8))
+                    os.write(master, b"X\x1b[A")
+                    wait_title(display, window, "FIT | Gray16 256x256 | 16 code bits | window 7.8-15.8")
+                    os.write(master, b" z")
+                    wait_title(display, window, "1:1 | Gray16 256x256 | 16 code bits | window 8-16")
+                    frame_matches(display, window, gray_region(8))
                     os.write(master, b"\x1b")
                 elif exit_method in ("q", "Q", "Ctrl+C"):
                     os.write(master, b"\x03" if exit_method == "Ctrl+C" else exit_method.encode())
@@ -348,7 +353,7 @@ def console_input_pipeline(test_binary, image, root, display, display_name):
                 stop(process)
             os.close(slave)
             os.close(master)
-    print("PASS: real PTY arrows/Z/X drive native pixels; Escape/Q/Ctrl+C/INT/TERM/VT-release restore input", flush=True)
+    print("PASS: real PTY arrows/Z/X/Space drive native pixels; Escape/Q/Ctrl+C/INT/TERM/VT-release restore input", flush=True)
 
 
 def clean_exits(binary, image, root, display, display_name, expected):
@@ -482,6 +487,42 @@ def downsampling(binary, root, display, display_name):
           flush=True)
 
 
+def measured_dr(binary, root, display, display_name):
+    path = root / "noisy.png"
+    width, height = 256, 128
+    state = 714301
+    rows = []
+    for y in range(height):
+        row = []
+        for x in range(width):
+            state = (state * 1664525 + 1013904223) & 0xFFFFFFFF
+            row.append(2000 + (x // 16) * 3500 + ((state >> 16) % 81) - 40)
+        rows.append(struct.pack(f">{width}H", *row))
+    path.write_bytes(png_bytes(width, height, 16, 0, rows))
+    before = fingerprint(path)
+    result = subprocess.run([str(binary), "-analyze", str(path)],
+                            capture_output=True, check=True,
+                            env={**os.environ, "SDL_VIDEODRIVER": "not-a-driver", "RAYON_NUM_THREADS": "2"})
+    value = json.loads(result.stdout)["dynamic_range"]["snr1_stops"]
+    assert value is not None and 0 < value < 14, value
+    suffix = f"| DR {value:.1f}"
+    with viewer(binary, ["-no-display-dr", "-dr", path], root, display_name, "measured-dr.log") as process:
+        window = loaded_window(display, process, f"window 8-16 {suffix}")
+        display.keys(window, ["Up", "z", "space"])
+        wait_title(display, window, f"window 7.8-15.8 {suffix}")
+        display.keys(window, ["x", "space"])
+        wait_title(display, window, f"window 8-16 {suffix}")
+        display.keys(window, ["Escape"])
+        assert process.wait(timeout=5) == 0
+    with viewer(binary, ["-no-dr", path], root, display_name, "unmeasured-dr.log") as process:
+        window = loaded_window(display, process, "window 8-16")
+        assert "| DR" not in display.title(window)
+        display.keys(window, ["Escape"])
+        assert process.wait(timeout=5) == 0
+    assert fingerprint(path) == before
+    print("PASS: default numeric DR, opt-out and re-enable match headless analysis and preserve pixels", flush=True)
+
+
 def exercise(binary, test_binary, root, display, display_name):
     gray = root / "all-codes.png"
     gray.write_bytes(png_bytes(256, 256, 16, 0,
@@ -505,6 +546,7 @@ def exercise(binary, test_binary, root, display, display_name):
 
     with viewer(binary, [gray, normal, large, broken, recovery], root, display_name, "viewer.log") as process:
         window = loaded_window(display, process, "FIT | Gray16 256x256 | 16 code bits | window 8-16")
+        assert "| DR" in display.title(window)
         assert display.geometry(window) == (0, 0, WIDTH, HEIGHT)
         display.keys(window, ["Left"])
         wait_title(display, window, "| 1/5 |")
@@ -520,6 +562,9 @@ def exercise(binary, test_binary, root, display, display_name):
             frame_matches(display, window, gray_region(target))
             shift = target
         print("PASS: fullscreen, first/end navigation, all 65,536 samples in all 41 fifth-bit native DR windows", flush=True)
+        display.keys(window, ["x", "Up", "Up", "space", "z"])
+        wait_title(display, window, "window 8-16")
+        frame_matches(display, window, gray_region(8))
 
         display.keys(window, ["x", "Right"])
         wait_title(display, window, "FIT | standard 256x256")
@@ -548,6 +593,8 @@ def exercise(binary, test_binary, root, display, display_name):
             (["Right"], (-138, -52)), (["Down"], (-138, -116)),
             (["Left"] * 20 + ["Up"] * 20, (0, 0)),
             (["Right"] * 20 + ["Down"] * 20, (-276, -232)),
+            (["space"], (-138, -116)),
+            (["Right"], (-202, -116)),
             (["z"], (-138, -116)),
         ]:
             display.keys(window, keys)
@@ -556,7 +603,7 @@ def exercise(binary, test_binary, root, display, display_name):
             assert "| 3/5 |" in display.title(window)
         display.keys(window, ["x"])
         wait_title(display, window, "FIT | Gray16 1300x1000 | 16 code bits | window 8-16")
-        print("PASS: Z/X, all pan directions, edge clamps and preserved DR selection", flush=True)
+        print("PASS: Z/X/Space, fit reset, all pan directions, edge clamps and preserved DR selection", flush=True)
 
         display.keys(window, ["Right"])
         wait_title(display, window, "Cannot load image:")
@@ -572,7 +619,7 @@ def exercise(binary, test_binary, root, display, display_name):
         assert "Cannot load image" in (root / "viewer.log").read_text()
         print("PASS: visible decode error, recovery, HUD expiry, last-image boundary and Escape", flush=True)
 
-    for preload in (0, 1, 3):
+    for preload in (0, 1, 3, 5):
         with viewer(binary, ["-preload", preload, "-brightness-step", "0.5", gray, normal, recovery],
                     root, display_name, f"preload-{preload}.log") as process:
             window = loaded_window(display, process, "window 8-16")
@@ -589,7 +636,7 @@ def exercise(binary, test_binary, root, display, display_name):
             frame_matches(display, window, gray_region(7.5))
             display.keys(window, ["Escape"])
             assert process.wait(timeout=5) == 0
-    print("PASS: preload 0/1/3, rapid forward/back navigation and configurable half-bit controls", flush=True)
+    print("PASS: preload 0/1/3/5, rapid forward/back navigation and configurable half-bit controls", flush=True)
 
     with viewer(binary, [gray, broken], root, display_name, "unvisited-error.log") as process:
         window = loaded_window(display, process, "FIT | Gray16")
@@ -601,6 +648,7 @@ def exercise(binary, test_binary, root, display, display_name):
 
     preserved_windows(binary, root, display, display_name, gray, normal, broken)
     downsampling(binary, root, display, display_name)
+    measured_dr(binary, root, display, display_name)
 
     for path, before in originals.items():
         assert fingerprint(path) == before, f"Input changed: {path}"
@@ -625,6 +673,15 @@ def exercise(binary, test_binary, root, display, display_name):
     slow = root / "loading.png"
     row = struct.pack(">8192H", *([65535] * 8192))
     slow.write_bytes(png_bytes(8192, 4096, 16, 0, [row] * 4096))
+    with viewer(binary, ["-preload", "0", gray, slow], root, display_name, "pending-reset.log") as process:
+        window = loaded_window(display, process, "window 8-16")
+        display.keys(window, ["Up"] * 15)
+        wait_title(display, window, "window 5-13")
+        display.keys(window, ["Right", "space", "z"])
+        wait_title(display, window, "1:1 | Gray16 8192x4096 | 16 code bits | window 8-16")
+        display.keys(window, ["Escape"])
+        assert process.wait(timeout=5) == 0
+    print("PASS: Space during cold loading resets a pending preserved DR window", flush=True)
     with viewer(binary, [slow], root, display_name, "loading.log") as process:
         window = loaded_window(display, process, "Loading...")
         start = time.monotonic()

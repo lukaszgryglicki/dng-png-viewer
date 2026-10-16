@@ -16,6 +16,7 @@ struct Dng {
     cfa: bool,
     orientation: u16,
     crop: Option<[u32; 4]>,
+    noise_profile: Option<Vec<f64>>,
     preview: bool,
     samples: Vec<u16>,
 }
@@ -30,6 +31,7 @@ impl Dng {
             cfa: false,
             orientation: 1,
             crop: None,
+            noise_profile: None,
             preview: false,
             samples: (0..width * height).map(|n| n as u16).collect(),
         }
@@ -85,6 +87,9 @@ impl Dng {
             50717u16,
             Value::Long(vec![(1u32 << self.bits) - 1; self.cpp as usize]),
         );
+        if let Some(profile) = &self.noise_profile {
+            raw.add_tag(51041u16, Value::Double(profile.clone()));
+        }
         if let Some([x, y, width, height]) = self.crop {
             raw.add_tag(50719u16, [x, y]);
             raw.add_tag(50720u16, [width, height]);
@@ -300,6 +305,128 @@ fn packed_dng_depths_crop_and_all_orientations_are_preserved() {
 }
 
 #[test]
+fn optional_dr_matches_converter_analysis_with_dng_calibration_crop_and_orientation() {
+    use dng_monochrome::range::{self, Histogram, RangeOptions};
+
+    let directory = tempdir().unwrap();
+    let mut source = Dng::gray(384, 288);
+    let mut state = 0x51f15eadu32;
+    for (index, sample) in source.samples.iter_mut().enumerate() {
+        let x = index % source.width as usize;
+        let y = index / source.width as usize;
+        let mut noise = 0i32;
+        for _ in 0..4 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            noise += (state & 255) as i32;
+        }
+        *sample =
+            (2500 + (x / 16) as i32 * 2000 + (y / 16) as i32 * 300 + (noise - 510) / 8) as u16;
+    }
+    source.crop = Some([16, 16, 352, 256]);
+    for calibrated in [false, true] {
+        source.noise_profile = calibrated.then(|| vec![0.0, 1e-7]);
+        for orientation in 1..=8 {
+            source.orientation = orientation;
+            let path = directory
+                .path()
+                .join(format!("measured-{calibrated}-{orientation}.dng"));
+            source.write(&path);
+            let before = fs::read(&path).unwrap();
+            let reference = dng_monochrome::raw::decode(&path, false).unwrap();
+            let histogram = Histogram::new(&reference.pixels).unwrap();
+            let expected = range::analyze(&reference, &histogram, RangeOptions::default())
+                .unwrap()
+                .dynamic_range;
+            assert!(expected.snr1_stops.is_some());
+            let measured = images::decode_with_dr(&path, true).unwrap();
+            assert_eq!(
+                measured.image.as_luma16().unwrap().as_raw(),
+                &reference.pixels,
+                "{calibrated}/{orientation}"
+            );
+            assert_eq!(
+                serde_json::to_value(measured.dynamic_range.as_ref().unwrap()).unwrap(),
+                serde_json::to_value(expected).unwrap(),
+                "{calibrated}/{orientation}"
+            );
+            let normal = images::decode(&path).unwrap();
+            assert!(normal.dynamic_range.is_none());
+            assert_eq!(normal.info, measured.info);
+            assert_eq!(normal.image.as_luma16(), measured.image.as_luma16());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn raster_dr_uses_stored_samples_not_dng_calibration_or_stretched_code_depth() {
+    use dng_monochrome::range::{self, Histogram, RangeOptions};
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("samples.dng");
+    let mut source = Dng::gray(256, 128);
+    let mut random = fastrand::Rng::with_seed(5811);
+    for (index, sample) in source.samples.iter_mut().enumerate() {
+        let signal = 2000 + (index % 256 / 16) as i32 * 3500;
+        *sample = (signal + random.i32(-40..=40)) as u16;
+    }
+    source.write(&path);
+    let mut reference = dng_monochrome::raw::decode(&path, false).unwrap();
+    reference.metadata.black_level = 0.0;
+    reference.metadata.white_level = u16::MAX;
+    let histogram = Histogram::new(&reference.pixels).unwrap();
+    let expected = range::analyze(&reference, &histogram, RangeOptions::default())
+        .unwrap()
+        .dynamic_range;
+    assert!(expected.snr1_stops.is_some_and(|value| value < 14.0));
+    let path = directory.path().join("samples.png");
+    DynamicImage::ImageLuma16(
+        ImageBuffer::from_vec(source.width, source.height, source.samples.clone()).unwrap(),
+    )
+    .save(&path)
+    .unwrap();
+    let measured = images::decode_with_dr(&path, true).unwrap();
+    assert_eq!(
+        measured.image.as_luma16().unwrap().as_raw(),
+        &source.samples
+    );
+    assert_eq!(
+        serde_json::to_value(measured.dynamic_range.unwrap()).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    assert!(images::decode(&path).unwrap().dynamic_range.is_none());
+}
+
+#[test]
+fn optional_dr_rejects_invalid_noise_profiles_without_affecting_plain_viewing() {
+    let directory = tempdir().unwrap();
+    for (index, profile) in [
+        vec![0.0, 0.0],
+        vec![1.0],
+        vec![1.0, 2.0, 3.0],
+        vec![-0.1, 1.0],
+        vec![f64::NAN, 1.0],
+        vec![f64::INFINITY, 1.0],
+        vec![1.0, f64::MAX],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = directory
+            .path()
+            .join(format!("invalid-profile-{index}.dng"));
+        let mut source = Dng::gray(16, 8);
+        source.noise_profile = Some(profile);
+        source.write(&path);
+        assert!(images::decode(&path).unwrap().dynamic_range.is_none());
+        let error = images::decode_with_dr(&path, true).unwrap_err();
+        assert!(format!("{error:#}").contains("NoiseProfile"), "{error:#}");
+    }
+}
+
+#[test]
 fn color_linear_and_cfa_dngs_are_developed_without_dr_controls() {
     let directory = tempdir().unwrap();
     for cfa in [false, true] {
@@ -332,6 +459,10 @@ fn color_linear_and_cfa_dngs_are_developed_without_dr_controls() {
         ));
         let pixel = decoded.image.as_rgba8().unwrap().get_pixel(12, 8).0;
         assert!(pixel[0] > pixel[1] && pixel[0] > pixel[2], "{pixel:?}");
+        let measured = images::decode_with_dr(&path, true).unwrap();
+        assert!(measured.dynamic_range.is_none());
+        assert_eq!(decoded.info, measured.info);
+        assert_eq!(decoded.image.as_rgba8(), measured.image.as_rgba8());
 
         source.crop = Some([2, 2, 20, 12]);
         source.orientation = 6;
@@ -366,6 +497,9 @@ fn high_bit_depth_monochrome_heic_and_avif_preserve_decoded_codes() {
                 &expected,
                 "{extension}/{bits}"
             );
+            let measured = images::decode_with_dr(&path, true).unwrap();
+            assert_eq!(decoded.image.as_luma16(), measured.image.as_luma16());
+            assert!(measured.dynamic_range.unwrap().snr1_stops.is_none());
             let Inspection::Dr(info) = decoded.info else {
                 panic!();
             };

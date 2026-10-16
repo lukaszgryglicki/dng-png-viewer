@@ -58,7 +58,7 @@ fn every_option_accepts_single_and_double_dash_forms() {
 #[test]
 fn preload_and_brightness_defaults_and_custom_values() {
     let cli = parse(&["a.png"]).unwrap();
-    assert_eq!((cli.preload, cli.brightness_step), (3, 0.2));
+    assert_eq!((cli.preload, cli.brightness_step), (5, 0.2));
     for prefix in ["-", "--"] {
         for (preload, step) in [
             (0, 0.1),
@@ -85,6 +85,100 @@ fn preload_and_brightness_defaults_and_custom_values() {
     );
     let cli = parse(&["-dir", "-brightness-step", "a.png"]).unwrap_err();
     assert_eq!(cli.kind(), ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn display_dr_defaults_on_and_both_alias_pairs_use_last_switch_wins() {
+    assert!(!parse(&["a.png"]).unwrap().no_display_dr);
+    let enabled = ["-display-dr", "--display-dr", "-dr", "--dr"];
+    let disabled = ["-no-display-dr", "--no-display-dr", "-no-dr", "--no-dr"];
+    for flag in enabled {
+        let cli = parse(&[flag, "a.png"]).unwrap();
+        assert!(cli.display_dr);
+        assert!(!cli.no_display_dr);
+        assert_eq!(cli.images, [PathBuf::from("a.png")]);
+        assert_eq!(cli.preload, 5);
+        assert!(parse(&["-analyze", flag, "a.png"]).is_ok());
+        let positional = parse(&["--", flag]).unwrap();
+        assert_eq!(positional.images, [PathBuf::from(flag)]);
+        assert!(!positional.display_dr);
+    }
+    for flag in disabled {
+        let cli = parse(&[flag, "a.png"]).unwrap();
+        assert!(cli.no_display_dr);
+        assert!(!cli.display_dr);
+        assert_eq!(cli.images, [PathBuf::from("a.png")]);
+        let positional = parse(&["--", flag]).unwrap();
+        assert_eq!(positional.images, [PathBuf::from(flag)]);
+        assert!(!positional.no_display_dr);
+    }
+    for enable in enabled {
+        for disable in disabled {
+            let cli = parse(&[disable, enable, enable, "a.png"]).unwrap();
+            assert!(cli.display_dr && !cli.no_display_dr);
+            let cli = parse(&[enable, disable, disable, "a.png"]).unwrap();
+            assert!(cli.no_display_dr && !cli.display_dr);
+        }
+    }
+    assert!(parse(&["--display-dr=true", "a.png"]).is_err());
+    assert!(parse(&["--dr=true", "a.png"]).is_err());
+    assert!(parse(&["--no-display-dr=true", "a.png"]).is_err());
+    assert!(parse(&["--no-dr=true", "a.png"]).is_err());
+    assert!(parse(&["-display-dr"]).is_err());
+    assert!(parse(&["-no-dr"]).is_err());
+    let help = parse(&["--help"]).unwrap_err().to_string();
+    assert!(help.contains("--display-dr") && help.contains("[alias: --dr]"));
+    assert!(help.contains("--no-display-dr") && help.contains("[alias: --no-dr]"));
+}
+
+#[test]
+fn headless_dr_defaults_on_supports_opt_out_and_reports_missing_measurements() {
+    let directory = tempdir().unwrap();
+    let image = directory.path().join("constant.pgm");
+    fs::write(&image, b"P5\n2 1\n65535\n\x80\x00\x80\x00").unwrap();
+    for (flags, enabled) in [
+        (vec!["-analyze"], true),
+        (vec!["-analyze", "-display-dr"], true),
+        (vec!["-analyze", "--display-dr"], true),
+        (vec!["-analyze", "-dr"], true),
+        (vec!["-analyze", "--dr"], true),
+        (vec!["-analyze", "-no-display-dr"], false),
+        (vec!["-analyze", "--no-display-dr"], false),
+        (vec!["-analyze", "-no-dr"], false),
+        (vec!["-analyze", "--no-dr"], false),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dng-png-viewer"))
+            .args(&flags)
+            .arg(&image)
+            .env("SDL_VIDEODRIVER", "not-a-driver")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(record["image"]["mode"], "dr");
+        if !enabled {
+            assert!(record.get("dynamic_range").is_none());
+        } else {
+            assert_eq!(record["dynamic_range"]["method"], "unavailable");
+            assert!(record["dynamic_range"]["snr1_stops"].is_null());
+        }
+    }
+    let color = directory.path().join("color.ppm");
+    fs::write(&color, b"P6\n1 1\n255\n\x11\x22\x33").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dng-png-viewer"))
+        .args(["-analyze", "--display-dr"])
+        .arg(color)
+        .env("SDL_VIDEODRIVER", "not-a-driver")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(record["image"]["mode"], "standard");
+    assert!(record["dynamic_range"].is_null());
+    assert_eq!(
+        fs::read(image).unwrap(),
+        b"P5\n2 1\n65535\n\x80\x00\x80\x00"
+    );
 }
 
 #[test]

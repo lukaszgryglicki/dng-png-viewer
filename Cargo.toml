@@ -14,12 +14,13 @@ static-sdl2 = ["sdl2/bundled", "sdl2/static-link"]
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+dng-monochrome = { git = "https://github.com/lukaszgryglicki/dng-monochrome", rev = "2f2715db1370433bdf4b1bae74692454eba25490", default-features = false }
 fastrand = "2.3"
 font8x8 = "0.3"
 globset = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "tiff", "webp", "pnm", "tga", "hdr", "exr", "qoi", "ff"] }
 jpeg2k = { version = "0.10.1", default-features = false, features = ["openjpeg-sys", "strict-mode"] }
-libheif-rs = { version = "2.7", default-features = false, features = ["v1_17"] }
+libheif-rs = { version = "2.7", default-features = false, features = ["v1_19"] }
 rawler = "0.8"
 rayon = "1.11"
 sdl2 = { version = "0.38", features = ["use-pkgconfig"] }

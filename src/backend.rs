@@ -60,6 +60,7 @@ pub fn key(key: Keycode) -> Option<Key> {
         Keycode::Down => Some(Key::Down),
         Keycode::Z => Some(Key::Native),
         Keycode::X => Some(Key::Fit),
+        Keycode::Space => Some(Key::Reset),
         Keycode::Escape | Keycode::Q => Some(Key::Quit),
         _ => None,
     }
@@ -111,7 +112,7 @@ pub fn title(
         } else {
             "FIT"
         };
-        match &image.info {
+        let detail = match &image.info {
             Inspection::Dr(info) => format!(
                 "{mode} | Gray16 {}x{} | {} code bits | window {}-{}",
                 info.width,
@@ -123,6 +124,14 @@ pub fn title(
             Inspection::Standard { width, height, .. } => {
                 format!("{mode} | standard {width}x{height}")
             }
+        };
+        if let Some(dr) = &image.dynamic_range {
+            let value = dr
+                .snr1_stops
+                .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.1}"));
+            format!("{detail} | DR {value}")
+        } else {
+            detail
         }
     } else {
         message.to_owned()
@@ -152,6 +161,16 @@ pub fn run_with_downsample(
     brightness_step: f64,
     downsample: DownsampleFilter,
 ) -> Result<()> {
+    run_with_options(paths, preload, brightness_step, downsample, false)
+}
+
+pub fn run_with_options(
+    paths: Vec<PathBuf>,
+    preload: usize,
+    brightness_step: f64,
+    downsample: DownsampleFilter,
+    display_dr: bool,
+) -> Result<()> {
     ensure!(!paths.is_empty(), "cannot view an empty playlist");
     ensure!(
         brightness_step.is_finite() && brightness_step > 0.0 && brightness_step <= 8.0,
@@ -174,6 +193,7 @@ pub fn run_with_downsample(
         preload,
         brightness_step,
         downsample,
+        display_dr,
         console.as_mut(),
         &shutdown,
     );
@@ -188,6 +208,7 @@ fn run_sdl(
     preload: usize,
     brightness_step: f64,
     downsample: DownsampleFilter,
+    display_dr: bool,
     mut console: Option<&mut Console>,
     shutdown: &StopSignals,
 ) -> Result<()> {
@@ -225,7 +246,7 @@ fn run_sdl(
         .event_pump()
         .map_err(|error| anyhow!("opening native input: {error}"))?;
 
-    let loader = ImageLoader::new(paths.clone(), preload)?;
+    let loader = ImageLoader::new(paths.clone(), preload, display_dr)?;
     let mut index = 0usize;
     let mut generation = 0u64;
     loader.request(generation, index)?;
@@ -313,6 +334,10 @@ fn run_sdl(
                     }
                     Key::Fit => {
                         pending_native = false;
+                        Effect::None
+                    }
+                    Key::Reset if !pending_native => {
+                        pending_window = None;
                         Effect::None
                     }
                     Key::Left if !pending_native => Effect::Previous,
@@ -416,9 +441,9 @@ fn run_sdl(
             shown.clone_from(&base);
             if hud_visible {
                 let controls = if view.mode == Mode::Native || pending_native {
-                    "1:1: arrows pan | X fit | ESC/Q/Ctrl+C exit"
+                    "1:1: arrows pan | Space center | X fit | ESC/Q/Ctrl+C exit"
                 } else {
-                    "Arrows: previous/next, brighter/darker | Z 1:1 | ESC/Q/Ctrl+C exit"
+                    "Arrows: previous/next, brighter/darker | Space darkest | Z 1:1 | ESC/Q/Ctrl+C exit"
                 };
                 view::draw_hud(&mut shown, size, &[&caption, controls]);
             }
@@ -457,6 +482,7 @@ mod tests {
             3,
             view::DEFAULT_BRIGHTNESS_STEP,
             DownsampleFilter::default(),
+            false,
             Some(&mut console),
             &shutdown,
         );

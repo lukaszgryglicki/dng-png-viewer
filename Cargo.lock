@@ -363,11 +363,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b1e3a325bc115f096c8b77bbf027a7c2592230e70be2d985be950d3d5e60ebe"
 
 [[package]]
+name = "dng-monochrome"
+version = "0.1.0"
+source = "git+https://github.com/lukaszgryglicki/dng-monochrome?rev=2f2715db1370433bdf4b1bae74692454eba25490#2f2715db1370433bdf4b1bae74692454eba25490"
+dependencies = [
+ "anyhow",
+ "clap",
+ "jpeg-encoder",
+ "libheif-sys",
+ "mimalloc",
+ "openjpeg-sys",
+ "png",
+ "rawler",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
 name = "dng-png-viewer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "dng-monochrome",
  "fastrand",
  "font8x8",
  "globset",

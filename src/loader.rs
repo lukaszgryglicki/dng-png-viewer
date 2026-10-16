@@ -66,8 +66,10 @@ pub(crate) struct ImageLoader {
 }
 
 impl ImageLoader {
-    pub fn new(paths: Vec<PathBuf>, radius: usize) -> Result<Self> {
-        Self::with_decoder(paths, radius, images::decode)
+    pub fn new(paths: Vec<PathBuf>, radius: usize, display_dr: bool) -> Result<Self> {
+        Self::with_decoder(paths, radius, move |path| {
+            images::decode_with_dr(path, display_dr)
+        })
     }
 
     fn with_decoder<F>(paths: Vec<PathBuf>, radius: usize, decoder: F) -> Result<Self>
@@ -280,6 +282,23 @@ mod tests {
     }
 
     #[test]
+    fn default_radius_five_keeps_five_neighbors_on_both_sides() {
+        let cli = crate::cli::Cli::try_parse_compat(["viewer".into(), "photo.png".into()]).unwrap();
+        let (loader, calls) = loader(20, cli.preload);
+        loader.request(0, 8).unwrap();
+        receive(&loader, 0).unwrap();
+        cached(&loader, &(3..=13).collect::<Vec<_>>());
+        assert_eq!(calls[2].load(Ordering::SeqCst), 0);
+        assert_eq!(calls[14].load(Ordering::SeqCst), 0);
+        loader.request(1, 9).unwrap();
+        receive(&loader, 1).unwrap();
+        cached(&loader, &(4..=14).collect::<Vec<_>>());
+        for count in &calls[3..=14] {
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
     fn radius_three_slides_reuses_both_sides_and_releases_evicted_images() {
         let (loader, calls) = loader(12, 3);
         loader.request(0, 4).unwrap();
@@ -340,7 +359,7 @@ mod tests {
         receive(&single, 0).unwrap();
         cached(&single, &[0]);
         assert!(single.request(1, 1).is_err());
-        assert!(ImageLoader::new(Vec::new(), 3).is_err());
+        assert!(ImageLoader::new(Vec::new(), 5, false).is_err());
     }
 
     #[test]

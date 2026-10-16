@@ -14,12 +14,12 @@ use std::{
 #[derive(Debug, Parser)]
 #[command(version, about = "Native fullscreen Gray16 bit-window viewer for macOS, X11 and KMSDRM consoles.",
     group(ArgGroup::new("sources").required(true).multiple(true).args(["images", "directories"])),
-    after_help = "Fit mode: LEFT/RIGHT previous/next; UP brighter, DOWN darker; Z native 1:1.\n\
-        Native mode: arrows pan toward the requested image edge; X returns to fit.\n\
+    after_help = "Fit mode: LEFT/RIGHT previous/next; UP brighter, DOWN darker; SPACE resets to darkest; Z native 1:1.\n\
+        Native mode: arrows pan toward the requested image edge; SPACE centers; X returns to fit.\n\
         ESC, Q or Ctrl+C exits with cleanup in both desktop and console modes.\n\
         DR starts at the full-range window; UP/DOWN adjust by --brightness-step bits.\n\
         FreeBSD console: active physical text VT only, not SSH/tmux; switching VTs exits.\n\
-        Single-dash long options work: -dir /photos -preload 3 -brightness-step 0.2.\n\
+        Single-dash long options work: -dir /photos -preload 5 -brightness-step 0.2 -display-dr.\n\
         Pass directories for recursive discovery; quote globs to expand them here, not in the shell.\n\
         The complete image list has no count limit and is shuffled only once with --shuffle.")]
 pub struct Cli {
@@ -46,7 +46,21 @@ pub struct Cli {
     pub analyze: bool,
     #[arg(
         long,
-        default_value_t = 3,
+        visible_alias = "dr",
+        overrides_with_all = ["display_dr", "no_display_dr"],
+        help = "Calculate and display noise-limited DR for Gray16 images using dng-monochrome's estimator (default)"
+    )]
+    pub display_dr: bool,
+    #[arg(
+        long,
+        visible_alias = "no-dr",
+        overrides_with_all = ["display_dr", "no_display_dr"],
+        help = "Skip noise-limited DR calculation and display"
+    )]
+    pub no_display_dr: bool,
+    #[arg(
+        long,
+        default_value_t = 5,
         value_name = "N",
         help = "Preload N images on each side in the background; 0 disables preloading"
     )]
@@ -93,6 +107,10 @@ impl Cli {
                 "dir",
                 "shuffle",
                 "analyze",
+                "display-dr",
+                "dr",
+                "no-display-dr",
+                "no-dr",
                 "preload",
                 "brightness-step",
                 "downsample",
@@ -148,13 +166,16 @@ impl Cli {
 
     pub fn run(self) -> Result<()> {
         let paths = self.playlist()?;
+        let display_dr = self.display_dr || !self.no_display_dr;
         if self.analyze {
             let mut errors = 0;
             for path in paths {
-                match images::inspect(&path) {
-                    Ok(info) => {
-                        let record =
-                            serde_json::json!({"source": path.to_string_lossy(), "image": info});
+                match images::decode_with_dr(&path, display_dr) {
+                    Ok(image) => {
+                        let mut record = serde_json::json!({"source": path.to_string_lossy(), "image": image.info});
+                        if display_dr {
+                            record["dynamic_range"] = serde_json::to_value(image.dynamic_range)?;
+                        }
                         serde_json::to_writer(io::stdout().lock(), &record)?;
                         writeln!(io::stdout().lock())?;
                     }
@@ -167,7 +188,13 @@ impl Cli {
             ensure!(errors == 0, "{errors} image(s) could not be inspected");
             return Ok(());
         }
-        backend::run_with_downsample(paths, self.preload, self.brightness_step, self.downsample)
+        backend::run_with_options(
+            paths,
+            self.preload,
+            self.brightness_step,
+            self.downsample,
+            display_dr,
+        )
     }
 }
 

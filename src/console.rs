@@ -52,6 +52,7 @@ impl Keyboard {
                     }
                     b'z' | b'Z' => keys.push(Key::Native),
                     b'x' | b'X' => keys.push(Key::Fit),
+                    b' ' => keys.push(Key::Reset),
                     b'q' | b'Q' | 0x03 | 0x1a | 0x1c => keys.push(Key::Quit),
                     _ => {}
                 }
@@ -109,7 +110,7 @@ mod tests {
         let mut keyboard = Keyboard::default();
         assert_eq!(
             keyboard.feed(
-                b"zZxX\x1b[A\x1b[B\x1b[C\x1b[D\x1bOA\x1bOB\x1bOC\x1bOD",
+                b"zZxX \x1b[A\x1b[B\x1b[C\x1b[D\x1bOA\x1bOB\x1bOC\x1bOD",
                 Instant::now()
             ),
             [
@@ -117,6 +118,7 @@ mod tests {
                 Key::Native,
                 Key::Fit,
                 Key::Fit,
+                Key::Reset,
                 Key::Up,
                 Key::Down,
                 Key::Right,

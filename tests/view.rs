@@ -112,6 +112,62 @@ fn native_arrows_pan_toward_the_requested_edge_and_x_preserves_window() {
 }
 
 #[test]
+fn space_centers_native_without_changing_brightness_and_resets_fit_to_darkest() {
+    let space = backend::key(Keycode::Space).expect("Space must be a viewer control");
+    let image = gray(1000, 800, vec![4095; 800000]);
+    let viewport = size(201, 101);
+    let mut view = View::new(&image.info);
+    view.brightness_step = 0.5;
+    view.handle(Key::Up, &image.info, image.size(), viewport);
+    view.handle(Key::Native, &image.info, image.size(), viewport);
+    view.handle(Key::Right, &image.info, image.size(), viewport);
+    view.handle(Key::Up, &image.info, image.size(), viewport);
+    assert_ne!((view.pan_x, view.pan_y), (0, 0));
+    assert_eq!(
+        view.handle(space, &image.info, image.size(), viewport),
+        Effect::Redraw
+    );
+    assert_eq!(
+        (
+            view.mode,
+            view.shift,
+            view.pan_x,
+            view.pan_y,
+            view.brightness_step
+        ),
+        (Mode::Native, 3.5, 0, 0, 0.5)
+    );
+    let layout = view.layout(image.size(), viewport);
+    assert_eq!((layout.left, layout.top), (-400.0, -350.0));
+    assert_eq!(
+        view.handle(space, &image.info, image.size(), viewport),
+        Effect::None
+    );
+    view.handle(Key::Fit, &image.info, image.size(), viewport);
+    assert_eq!(
+        view.handle(space, &image.info, image.size(), viewport),
+        Effect::Redraw
+    );
+    assert_eq!(
+        (view.mode, view.shift, view.brightness_step),
+        (Mode::Fit, 4.0, 0.5)
+    );
+    for maximum in [0, 1, 255, 256, 4095, 65535] {
+        let image = gray(1, 1, vec![maximum]);
+        let mut view = View::new(&image.info);
+        let initial = view.shift;
+        view.handle(Key::Up, &image.info, image.size(), viewport);
+        view.handle(space, &image.info, image.size(), viewport);
+        assert_eq!(view.shift, initial);
+        assert_eq!(view.mode, Mode::Fit);
+        assert_eq!(
+            view.handle(space, &image.info, image.size(), viewport),
+            Effect::None
+        );
+    }
+}
+
+#[test]
 fn normal_images_ignore_dr_keys_but_still_zoom_and_pan() {
     let image = LoadedImage::new(DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
         200,
@@ -121,7 +177,7 @@ fn normal_images_ignore_dr_keys_but_still_zoom_and_pan() {
     .unwrap();
     let mut view = View::new(&image.info);
     assert!(matches!(image.info, Inspection::Standard { .. }));
-    for key in [Key::Up, Key::Down] {
+    for key in [Key::Up, Key::Down, Key::Reset] {
         assert_eq!(
             view.handle(key, &image.info, image.size(), size(10, 10)),
             Effect::None
@@ -671,12 +727,13 @@ fn sdl_keys_and_display_selection_are_explicit() {
         (Keycode::Down, Key::Down),
         (Keycode::Z, Key::Native),
         (Keycode::X, Key::Fit),
+        (Keycode::Space, Key::Reset),
         (Keycode::Escape, Key::Quit),
         (Keycode::Q, Key::Quit),
     ] {
         assert_eq!(backend::key(code), Some(expected));
     }
-    assert_eq!(backend::key(Keycode::Space), None);
+    assert_eq!(backend::key(Keycode::A), None);
     use sdl2::keyboard::Mod;
     for modifiers in [Mod::LCTRLMOD, Mod::RCTRLMOD, Mod::LCTRLMOD | Mod::LSHIFTMOD] {
         assert_eq!(backend::key_press(Keycode::C, modifiers), Some(Key::Quit));
@@ -783,4 +840,41 @@ fn captions_distinguish_loading_normal_native_and_dr_without_control_characters(
     )))
     .unwrap();
     assert!(backend::title(0, &paths, Some(&normal), &view, "").contains("standard 1x2"));
+}
+
+#[test]
+fn optional_dr_caption_is_noise_limited_rounded_and_independent_of_the_window() {
+    use dng_monochrome::noise::{DynamicRange, NoiseEstimate};
+
+    let paths = vec![PathBuf::from("photo.png")];
+    let mut image = gray(1, 1, vec![4095]);
+    let mut view = View::new(&image.info);
+    assert!(!backend::title(0, &paths, Some(&image), &view, "").contains("| DR"));
+    let noise = NoiseEstimate {
+        dark_sigma_codes: Some(1.0),
+        ..NoiseEstimate::default()
+    };
+    image.dynamic_range = Some(DynamicRange::estimate(
+        &noise,
+        0.0,
+        0.0,
+        11.74_f64.exp2(),
+        true,
+    ));
+    let title = backend::title(0, &paths, Some(&image), &view, "");
+    assert!(title.ends_with("| window 4-12 | DR 11.7"), "{title}");
+    assert!(!title.contains("stops"));
+    for key in [Key::Up, Key::Native, Key::Reset, Key::Fit, Key::Reset] {
+        view.handle(key, &image.info, image.size(), size(100, 100));
+        assert!(backend::title(0, &paths, Some(&image), &view, "").ends_with("| DR 11.7"));
+    }
+    image.dynamic_range = Some(DynamicRange::estimate(
+        &NoiseEstimate::default(),
+        0.0,
+        0.0,
+        4095.0,
+        true,
+    ));
+    assert!(backend::title(0, &paths, Some(&image), &view, "").ends_with("| DR unavailable"));
+    assert!(!backend::title(0, &paths, None, &view, "Loading...").contains("| DR"));
 }

@@ -1,3 +1,4 @@
+use crate::dr::Calibration;
 use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageBuffer, metadata::Orientation};
 use rawler::{
@@ -48,7 +49,7 @@ pub(super) fn is_dng(path: &Path) -> Result<bool> {
     Ok(false)
 }
 
-pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
+pub(super) fn decode(path: &Path, display_dr: bool) -> Result<(DynamicImage, Option<Calibration>)> {
     let raw = rawler::decode_file(path).context("decoding DNG raw samples")?;
     ensure!(raw.camera.mode == "dng", "input is not a DNG");
     let count = match &raw.data {
@@ -96,6 +97,11 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
             raw.photometric,
             RawPhotometricInterpretation::BlackIsZero | RawPhotometricInterpretation::LinearRaw
         );
+    let calibration = if display_dr && monochrome && matches!(&raw.data, RawImageData::Integer(_)) {
+        Some(Calibration::from_dng(path, &raw)?)
+    } else {
+        None
+    };
     let mut image = if monochrome && matches!(&raw.data, RawImageData::Integer(_)) {
         let RawImageData::Integer(data) = raw.data else {
             unreachable!()
@@ -126,5 +132,5 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
         DynamicImage::ImageRgba8(developed.into_rgba8())
     };
     image.apply_orientation(orientation);
-    Ok(image)
+    Ok((image, calibration))
 }

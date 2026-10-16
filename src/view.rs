@@ -52,6 +52,7 @@ pub enum Key {
     Down,
     Native,
     Fit,
+    Reset,
     Quit,
 }
 
@@ -158,6 +159,14 @@ impl View {
                 self.mode = Mode::Fit;
                 self.pan_x = 0;
                 self.pan_y = 0;
+            }
+            Key::Reset => {
+                if self.mode == Mode::Native {
+                    self.pan_x = 0;
+                    self.pan_y = 0;
+                } else if let Inspection::Dr(info) = info {
+                    self.shift = f64::from(info.initial_shift);
+                }
             }
             Key::Left if self.mode == Mode::Fit => return Effect::Previous,
             Key::Right if self.mode == Mode::Fit => return Effect::Next,

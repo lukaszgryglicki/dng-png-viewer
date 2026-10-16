@@ -70,7 +70,7 @@ no separate OpenJPEG development package is needed.
 Ubuntu's native package exports can also require `aom-tools` (AOM CMake targets)
 and `libnuma-dev` (x265's advertised linker dependency), as listed above.
 Alpine's corresponding x265 linker dependency is supplied by `numactl-dev`.
-To use a system libheif >=1.17 instead, install its development
+To use a system libheif >=1.19 instead, install its development
 package and build with `cargo build --locked --release --no-default-features`.
 That library must have suitable HEVC/AV1 decoders: some FFmpeg-backed builds reject
 12-bit grayscale HEIC. Missing codecs or unsupported files produce explicit errors.
@@ -130,7 +130,7 @@ building directly with Cargo's `static-sdl2` feature.
 ./target/release/dng-png-viewer *.png
 ./target/release/dng-png-viewer -dir /photos/dng-mono
 ./target/release/dng-png-viewer first.png -dir /photos/one -dir /photos/two *.jpg -shuffle
-./target/release/dng-png-viewer -preload 3 -brightness-step 0.2 *.DNG
+./target/release/dng-png-viewer -preload 5 -brightness-step 0.2 -display-dr *.DNG
 ./target/release/dng-png-viewer -preload 0 -dir /photos
 ./target/release/dng-png-viewer -analyze -dir /photos/dng-mono
 ./target/release/dng-png-viewer -help
@@ -148,6 +148,7 @@ exit status nonzero, even if subsequent images load successfully.
 | Up / Down | Brighter / darker DR window; no action for ordinary images | Pan toward the top / bottom of the image |
 | Z | Center at one source pixel per display pixel | Recenter at 1:1 |
 | X | Recenter and fit to screen | Return to fit-to-screen |
+| Space | Reset to the initial darkest DR window | Recenter without changing the DR window |
 | Escape / Q / Ctrl+C | Exit with cleanup | Exit with cleanup |
 
 `Q` works with or without Shift. Ctrl+C is handled both as a focused-window
@@ -221,6 +222,21 @@ reports minimum/maximum, occupied levels and `log2(maximum - minimum + 1)` in
 analysis mode; none should be mistaken for a sensor SNR measurement. A constant
 white image has 16 code bits but zero sample-span bits.
 
+A separate noise-limited DR estimate is displayed by default, for example
+`| window 4-12 | DR 11.7`. `-no-display-dr` (shortcut `-no-dr`) skips this
+calculation and display; `-display-dr`/`-dr` re-enables it. The last switch wins.
+It reuses the pinned `dng-monochrome` library's
+default SNR-1 analysis, including clipping strength 3, DNG black/white
+calibration and NoiseProfile. No converter executable or sibling checkout is
+required. The calculation runs once during image loading, is cached with the
+pixels, and does not change when panning or adjusting the display window.
+Insufficient evidence is shown as `DR unavailable`; ordinary color/8-bit
+display images do not receive a DR estimate. For other Gray16 files it
+estimates the stored pixels with a zero black level, not the original DNG's
+DR: clipping, tone curves and compression can change that estimate.
+`-analyze` includes the full `dynamic_range` result in JSON (null for standard
+images); `-no-dr` omits that field.
+
 ## Ordinary images and metadata
 
 Supported formats: DNG, PNG, JPEG, HEIC/HEIF (`.heic`, `.heif`, `.hif`), AVIF,
@@ -271,7 +287,9 @@ its argument limit before the program starts.
 | --- | --- |
 | `-dir DIRECTORY` | Recursively add supported image extensions; repeat freely |
 | `-shuffle` | Shuffle once after all inputs are expanded and deduplicated |
-| `-preload N` | Background-decode up to N images on each side; default 3, 0 disables preloading |
+| `-preload N` | Background-decode up to N images on each side; default 5, 0 disables preloading |
+| `-display-dr`, `-dr` | Calculate and display the noise-limited SNR-1 estimate for Gray16 images; default on |
+| `-no-display-dr`, `-no-dr` | Skip noise-limited DR calculation and display |
 | `-brightness-step BITS` | DR adjustment per Up/Down keypress; default 0.2, valid range greater than 0 through 8 |
 | `-downsample FILTER` | Shrinking filter: `area`/`full` (default average), `bilinear` (previous behavior), or one `random`, `middle`, `NE`, `NW`, `SE`, `SW` pixel |
 | `-analyze` | Print one JSON object per image without opening a display |
@@ -314,7 +332,7 @@ startup or navigation faster than decoding can still show a loading message.
 Preload errors are shown only if that image is selected.
 
 The cache costs decoded-image memory, not compressed-file size: a 60-megapixel
-Gray16 image uses about 120 MB, so seven such images use about 840 MB, plus
+Gray16 image uses about 120 MB, so eleven such images use about 1.32 GB, plus
 in-flight decoding and rendering buffers. Use a smaller radius or `-preload 0`
 on memory-constrained machines. Preloading is not used by `-analyze`.
 

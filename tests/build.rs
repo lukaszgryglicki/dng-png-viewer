@@ -26,6 +26,7 @@ fn make_fixture() -> TempDir {
     fs::create_dir(&tools).unwrap();
     for (name, body) in [
         ("uname", "printf '%s\\n' \"$MOCK_OS\"\n"),
+        ("ninja", "exit 0\n"),
         (
             "rustc",
             "printf 'rustc %s (fixture)\\n' \"${MOCK_RUST_VERSION:-1.98.1}\"\n",
@@ -149,6 +150,12 @@ fn requirements_installs_native_dependencies_on_each_supported_platform() {
         if os == "Linux" {
             assert!(packages.contains("aom-tools"));
             assert!(packages.contains("libnuma-dev"));
+            assert!(
+                packages
+                    .split_whitespace()
+                    .any(|package| package == "clang")
+            );
+            assert!(packages.contains("libclang-dev"));
         }
         assert!(!packages.contains("musl"));
         assert_eq!(dir.path().join("privilege-calls").exists(), os != "Darwin");

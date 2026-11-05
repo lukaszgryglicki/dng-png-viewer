@@ -1,3 +1,7 @@
+if("$ENV{CARGO_PKG_NAME}" STREQUAL "jxl-sys")
+    return()
+endif()
+
 if(CMAKE_VERSION VERSION_LESS 3.22)
     message(FATAL_ERROR "The viewer requires CMake 3.22 or newer for mandatory HEIF decoder checks")
 endif()

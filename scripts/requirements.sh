@@ -33,7 +33,7 @@ have_rust() {
 install_packages() {
     case "$os" in
         FreeBSD)
-            packages="cmake pkgconf sdl2 x265 aom libde265"
+            packages="cmake pkgconf sdl2 x265 aom libde265 ninja"
             if ! have_rust; then packages="$packages rust"; fi
             missing=""
             for package in $packages; do
@@ -45,7 +45,7 @@ install_packages() {
             xcode-select -p >/dev/null 2>&1 ||
                 fail "Install Apple's Command Line Tools with xcode-select --install first."
             need brew
-            packages="cmake pkgconf sdl2 x265 aom libde265"
+            packages="cmake pkgconf sdl2 x265 aom libde265 ninja"
             if ! have_rust; then packages="$packages rust"; fi
             missing=""
             for package in $packages; do
@@ -57,11 +57,11 @@ install_packages() {
             if command -v apt-get >/dev/null 2>&1; then
                 as_root apt-get update
                 as_root apt-get install -y --no-install-recommends --no-upgrade \
-                    build-essential cmake pkg-config curl ca-certificates \
-                    libsdl2-dev libx265-dev libaom-dev libde265-dev aom-tools libnuma-dev
+                    build-essential cmake pkg-config ninja-build curl ca-certificates \
+                    libsdl2-dev libx265-dev libaom-dev libde265-dev aom-tools libnuma-dev clang libclang-dev
             elif command -v apk >/dev/null 2>&1; then
-                as_root apk add build-base cmake pkgconf curl ca-certificates \
-                    sdl2-dev x265-dev aom-dev libde265-dev numactl-dev
+                as_root apk add build-base cmake pkgconf ninja curl ca-certificates \
+                    sdl2-dev x265-dev aom-dev libde265-dev numactl-dev clang clang-dev
             else
                 fail "Automatic Linux packages require apt-get (Debian/Ubuntu) or apk (Alpine). See README.md."
             fi
@@ -88,7 +88,7 @@ install_rust() {
 }
 
 check() {
-    for tool in "${CARGO:-cargo}" rustc cc c++ cmake pkg-config make; do need "$tool"; done
+    for tool in "${CARGO:-cargo}" rustc cc c++ cmake pkg-config make ninja; do need "$tool"; done
     have_rust || fail "Rust 1.89+ is required."
     cmake --version | awk 'NR == 1 { split($3, v, "."); ok = v[1] > 3 || (v[1] == 3 && v[2] >= 22) } END { exit !ok }' ||
         fail "CMake 3.22+ is required."

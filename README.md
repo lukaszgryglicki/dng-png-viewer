@@ -8,13 +8,14 @@ Ordinary images use normal 8-bit color display.
 The program decodes images, selects windows, scales/pans, draws and handles keys
 itself. **No external viewer, mpv, FFmpeg executable, helper process or temporary
 rendered image is needed.** SDL2 supplies native window, display and input access;
-DNG, HEIC/HEIF/AVIF and JPEG2000 decoding also happens in-process. Image files
+DNG, HEIC/HEIF/AVIF, JPEG2000 and JPEG XL decoding also happens in-process. Image files
 are read-only.
 
 ## Build
 
-Requires Rust 1.89+, C/C++ compilers, CMake 3.22+, `pkg-config`, and SDL2, libde265 and
-libaom development files. The codec tests also need x265 to generate HEIC fixtures.
+Requires Rust 1.89+, C/C++ compilers, CMake 3.22+, Ninja, `pkg-config`, and SDL2, libde265 and
+libaom development files. The codec tests also need x265 to generate HEIC fixtures
+and Clang/libclang to build the packaged libjxl used for JPEG XL fixtures.
 
 ```sh
 make requirements     # install/check native and SDL2-static build prerequisites
@@ -67,6 +68,8 @@ libraries remain dynamically linked; no system libheif is replaced. Only HEVC/AV
 codecs are enabled by `.cargo/heif.cmake`; the existing SDL2-specific toolchain
 remains separate. JPEG2000 uses packaged OpenJPEG source built with the program;
 no separate OpenJPEG development package is needed.
+JPEG XL decoding uses the Rust `jxl-oxide` decoder, with no native libjxl runtime
+dependency or external helper.
 Ubuntu's native package exports can also require `aom-tools` (AOM CMake targets)
 and `libnuma-dev` (x265's advertised linker dependency), as listed above.
 Alpine's corresponding x265 linker dependency is supplied by `numactl-dev`.
@@ -244,10 +247,11 @@ for every image; `-no-dr` omits that field.
 
 Supported formats: DNG, PNG, JPEG, HEIC/HEIF (`.heic`, `.heif`, `.hif`), AVIF,
 JPEG2000 (`.jp2` containers and `.j2k`/`.j2c`/`.jpc` codestreams),
+JPEG XL (`.jxl` containers and raw codestreams),
 GIF, BMP, TIFF, WebP, ICO, PBM/PGM/PPM/PAM/PNM, TGA, QOI, farbfeld (`.ff`),
 Radiance HDR and OpenEXR. Animated formats display their initial image;
 HEIF containers display the primary image. This is a still-image viewer,
-not an animation player. Other camera raw formats and JPEG XL are not supported.
+not an animation player. Other camera raw formats are not supported.
 
 Integer monochrome DNGs use full-resolution raw samples, not embedded previews.
 The viewer applies the raw crop and orientation but does not subtract the black
@@ -256,8 +260,8 @@ to ordinary color; floating-point DNGs also use the ordinary display path.
 
 Only decoded opaque high-bit-depth integer grayscale images enable DR scrolling:
 Gray16 PNG/TIFF/PGM, integer monochrome DNG, and compatible high-bit-depth
-monochrome HEIC/AVIF/JPEG2000. Ten- and twelve-bit grayscale HEIF samples and
-9-16-bit JPEG2000 samples retain their decoded code values in 16-bit storage,
+monochrome HEIC/AVIF/JPEG2000/JPEG XL. Ten- and twelve-bit grayscale HEIF samples and
+9-16-bit JPEG2000/JPEG XL samples retain their decoded code values in 16-bit storage,
 without stretching them to 65535. Signed JPEG2000 samples are biased into the
 corresponding unsigned code range. Unsupported JPEG2000 precision, subsampling
 or color/alpha layouts produce explicit errors rather than guessed colors.
@@ -266,6 +270,8 @@ ordinary display path. Higher-precision color images, including 10/12-bit HEIC,
 are converted to 8-bit color; they do not enable DR scrolling.
 Alpha is composited over black with premultiplied interpolation. Decoder-provided
 EXIF orientation is applied before layout and statistics.
+JPEG XL uses its codestream orientation, which takes precedence over EXIF.
+Floating-point JPEG XL images use the ordinary display path.
 
 The viewer displays stored channel values; it is not an ICC-managed proofing
 application or an HDR-monitor output pipeline. In particular, Gray16 code-window

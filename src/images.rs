@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 mod dng;
 mod heif;
 mod jpeg2000;
+mod jpegxl;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -37,6 +38,7 @@ pub fn supported_extension(path: &Path) -> bool {
                     | "j2k"
                     | "j2c"
                     | "jpc"
+                    | "jxl"
                     | "jpg"
                     | "jpeg"
                     | "jpe"
@@ -354,6 +356,9 @@ pub fn decode_with_dr(path: &Path, display_dr: bool) -> Result<LoadedImage> {
     );
     if jpeg2000::is_jpeg2000(path)? {
         return LoadedImage::prepare(jpeg2000::decode(path)?, display_dr, None);
+    }
+    if jpegxl::is_jpegxl(path)? {
+        return LoadedImage::prepare(jpegxl::decode(path)?, display_dr, None);
     }
     if heif::is_heif(path)? {
         return LoadedImage::prepare(heif::decode(path)?, display_dr, None);

@@ -296,7 +296,8 @@ its argument limit before the program starts.
 | --- | --- |
 | `-dir DIRECTORY` | Recursively add supported image extensions; repeat freely |
 | `-shuffle` | Shuffle once after all inputs are expanded and deduplicated |
-| `-preload N` | Background-decode up to N images on each side; default 5, 0 disables preloading |
+| `-preload N` | Preferred preload radius; keep up to 2*N neighbors, shifting at ends; default 5, 0 disables preloading |
+| `-jobs N` | Decode up to N background files simultaneously; default 10, valid range 1-256 |
 | `-display-dr`, `-dr` | Calculate and display noise-based DR for every image; default on |
 | `-no-display-dr`, `-no-dr` | Skip noise-limited DR calculation and display |
 | `-brightness-step BITS` | DR adjustment per Up/Down keypress; default 0.2, valid range greater than 0 through 8 |
@@ -331,18 +332,22 @@ building the list does not decode the images. `-shuffle` runs once on the final
 list; navigation and prefetch use exactly that order for the whole viewing
 session. The expanded list is never passed to a shell or another process.
 
-Preloading keeps decoded pixels in a rolling cache of at most `2*N + 1` images,
-bounded by the playlist ends. Moving right schedules the new rightmost neighbor
-and drops images outside the new range; moving left works symmetrically.
-The current image has its own loader, while a separate background worker loads
-nearby images first using an independent single-thread pixel pool. Display/input
-does not wait for preloads. Cached images can be selected immediately; cold
-startup or navigation faster than decoding can still show a loading message.
+Preloading keeps decoded pixels in a rolling cache of `2*N + 1` images, or the
+entire playlist if shorter. The window shifts at either end to stay full:
+with `-preload 5`, the first image preloads ten successors and the last image
+preloads ten predecessors. Away from the ends, moving right schedules the new
+rightmost neighbor and drops the oldest; moving left works symmetrically.
+The current image has its own loader, while background workers load nearby images
+first, each using an independent single-thread pixel pool. `-jobs` is capped by
+available CPUs, playlist size and preload window; `-jobs 1` restores serial
+preloading. Display/input does not wait for preloads. Cached images can be selected
+immediately; cold startup or navigation faster than decoding can still show a
+loading message.
 Preload errors are shown only if that image is selected.
 
 The cache costs decoded-image memory, not compressed-file size: a 60-megapixel
 Gray16 image uses about 120 MB, so eleven such images use about 1.32 GB, plus
-in-flight decoding and rendering buffers. Use a smaller radius or `-preload 0`
+in-flight decoding and rendering buffers. Use fewer jobs, a smaller radius or `-preload 0`
 on memory-constrained machines. Preloading is not used by `-analyze`.
 
 Analysis reports are JSON Lines on stdout; diagnostics go to stderr. Analysis

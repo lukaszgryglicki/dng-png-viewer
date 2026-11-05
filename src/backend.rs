@@ -1,7 +1,7 @@
 use crate::{
     console::Console,
     images::{Inspection, LoadedImage},
-    loader::ImageLoader,
+    loader::{DEFAULT_PRELOAD_JOBS, ImageLoader},
     signals::StopSignals,
     view::{self, DownsampleFilter, Effect, Key, Mode, Size, View},
 };
@@ -171,7 +171,26 @@ pub fn run_with_options(
     downsample: DownsampleFilter,
     display_dr: bool,
 ) -> Result<()> {
+    run_with_preload_jobs(
+        paths,
+        preload,
+        usize::from(DEFAULT_PRELOAD_JOBS),
+        brightness_step,
+        downsample,
+        display_dr,
+    )
+}
+
+pub fn run_with_preload_jobs(
+    paths: Vec<PathBuf>,
+    preload: usize,
+    jobs: usize,
+    brightness_step: f64,
+    downsample: DownsampleFilter,
+    display_dr: bool,
+) -> Result<()> {
     ensure!(!paths.is_empty(), "cannot view an empty playlist");
+    ensure!(jobs > 0, "preload jobs must be positive");
     ensure!(
         brightness_step.is_finite() && brightness_step > 0.0 && brightness_step <= 8.0,
         "brightness step must be finite, greater than 0 and at most 8 bits"
@@ -190,7 +209,7 @@ pub fn run_with_options(
     // All SDL objects must be destroyed before the guard can release a pending VT switch.
     let result = run_sdl(
         paths,
-        preload,
+        (preload, jobs),
         brightness_step,
         downsample,
         display_dr,
@@ -205,7 +224,7 @@ pub fn run_with_options(
 
 fn run_sdl(
     paths: Vec<PathBuf>,
-    preload: usize,
+    (preload, jobs): (usize, usize),
     brightness_step: f64,
     downsample: DownsampleFilter,
     display_dr: bool,
@@ -246,7 +265,7 @@ fn run_sdl(
         .event_pump()
         .map_err(|error| anyhow!("opening native input: {error}"))?;
 
-    let loader = ImageLoader::new(paths.clone(), preload, display_dr)?;
+    let loader = ImageLoader::new(paths.clone(), preload, jobs, display_dr)?;
     let mut index = 0usize;
     let mut generation = 0u64;
     loader.request(generation, index)?;
@@ -479,7 +498,7 @@ mod tests {
         let (mut console, before) = Console::test_pty().unwrap();
         let result = run_sdl(
             vec![image.into()],
-            3,
+            (3, usize::from(DEFAULT_PRELOAD_JOBS)),
             view::DEFAULT_BRIGHTNESS_STEP,
             DownsampleFilter::default(),
             false,

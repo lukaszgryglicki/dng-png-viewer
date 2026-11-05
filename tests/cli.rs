@@ -22,6 +22,8 @@ fn every_option_accepts_single_and_double_dash_forms() {
             &format!("{prefix}analyze"),
             &format!("{prefix}preload"),
             "5",
+            &format!("{prefix}jobs"),
+            "2",
             &format!("{prefix}brightness-step=0.5"),
             &format!("{prefix}downsample=bilinear"),
             "a.png",
@@ -29,6 +31,7 @@ fn every_option_accepts_single_and_double_dash_forms() {
         .unwrap();
         assert!(cli.shuffle && cli.analyze);
         assert_eq!(cli.preload, 5);
+        assert_eq!(cli.jobs, 2);
         assert_eq!(cli.brightness_step, 0.5);
         assert_eq!(cli.downsample, DownsampleFilter::Bilinear);
         assert_eq!(
@@ -85,6 +88,35 @@ fn preload_and_brightness_defaults_and_custom_values() {
     );
     let cli = parse(&["-dir", "-brightness-step", "a.png"]).unwrap_err();
     assert_eq!(cli.kind(), ErrorKind::UnknownArgument);
+}
+
+#[test]
+fn preload_jobs_accept_both_dash_forms_and_require_a_positive_bounded_count() {
+    assert_eq!(parse(&["a.png"]).unwrap().jobs, 10);
+    for prefix in ["-", "--"] {
+        for jobs in [1, 2, 8, 256] {
+            for args in [
+                vec![format!("{prefix}jobs"), jobs.to_string(), "a.png".into()],
+                vec!["a.png".into(), format!("{prefix}jobs={jobs}")],
+            ] {
+                let args: Vec<_> = args.iter().map(String::as_str).collect();
+                assert_eq!(parse(&args).unwrap().jobs, jobs);
+            }
+        }
+        for value in ["0", "-1", "257", "1.5", "many"] {
+            assert!(parse(&[&format!("{prefix}jobs={value}"), "a.png"]).is_err());
+        }
+        assert!(parse(&[&format!("{prefix}jobs")]).is_err());
+        let literal = format!("{prefix}jobs");
+        assert_eq!(
+            parse(&["--", &literal]).unwrap().images,
+            [PathBuf::from(literal)]
+        );
+    }
+    assert_eq!(
+        parse(&["-preload=0", "-jobs=8", "a.png"]).unwrap().preload,
+        0
+    );
 }
 
 #[test]

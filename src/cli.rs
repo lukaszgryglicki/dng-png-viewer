@@ -1,6 +1,7 @@
 use crate::{
     backend,
     images::{self, Source},
+    loader::DEFAULT_PRELOAD_JOBS,
     view::{DEFAULT_BRIGHTNESS_STEP, DownsampleFilter},
 };
 use anyhow::{Result, ensure};
@@ -62,9 +63,17 @@ pub struct Cli {
         long,
         default_value_t = 5,
         value_name = "N",
-        help = "Preload N images on each side in the background; 0 disables preloading"
+        help = "Preload radius N; shift full windows at playlist ends; 0 disables preloading"
     )]
     pub preload: usize,
+    #[arg(
+        long,
+        default_value_t = DEFAULT_PRELOAD_JOBS,
+        value_parser = clap::value_parser!(u16).range(1..=256),
+        value_name = "N",
+        help = "Background files decoded at once; each uses one pixel worker (1-256)"
+    )]
+    pub jobs: u16,
     #[arg(
         long,
         default_value_t = DEFAULT_BRIGHTNESS_STEP,
@@ -112,6 +121,7 @@ impl Cli {
                 "no-display-dr",
                 "no-dr",
                 "preload",
+                "jobs",
                 "brightness-step",
                 "downsample",
                 "help",
@@ -121,7 +131,11 @@ impl Cli {
                 let single = format!("-{name}");
                 let double = format!("--{name}");
                 let separate = bytes == single.as_bytes() || bytes == double.as_bytes();
-                if separate && matches!(name, "dir" | "preload" | "brightness-step" | "downsample")
+                if separate
+                    && matches!(
+                        name,
+                        "dir" | "preload" | "jobs" | "brightness-step" | "downsample"
+                    )
                 {
                     value_next = true;
                 }
@@ -188,9 +202,10 @@ impl Cli {
             ensure!(errors == 0, "{errors} image(s) could not be inspected");
             return Ok(());
         }
-        backend::run_with_options(
+        backend::run_with_preload_jobs(
             paths,
             self.preload,
+            usize::from(self.jobs),
             self.brightness_step,
             self.downsample,
             display_dr,

@@ -1,11 +1,14 @@
 use crate::images::{self, LoadedImage};
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, mpsc},
     thread::{self, JoinHandle},
 };
+
+pub(crate) const DEFAULT_PRELOAD_JOBS: u16 = 10;
 
 type Loaded = std::result::Result<Arc<LoadedImage>, Arc<str>>;
 type Completion = (u64, Loaded);
@@ -14,8 +17,10 @@ type Completion = (u64, Loaded);
 struct State {
     center: usize,
     generation: u64,
+    window: Range<usize>,
     cache: HashMap<usize, Loaded>,
     pending: VecDeque<usize>,
+    in_flight: HashSet<usize>,
     stopped: bool,
 }
 
@@ -26,9 +31,12 @@ struct Shared {
 }
 
 impl Shared {
-    fn store(&self, index: usize, result: Loaded) -> Loaded {
+    fn store(&self, index: usize, result: Loaded, preloaded: bool) -> Loaded {
         let mut state = self.state.lock().expect("image cache lock");
-        if !state.stopped && state.center.abs_diff(index) <= self.radius {
+        if preloaded {
+            state.in_flight.remove(&index);
+        }
+        if !state.stopped && state.window.contains(&index) {
             let result = state.cache.entry(index).or_insert(result).clone();
             self.changed.notify_all();
             result
@@ -45,7 +53,10 @@ impl Shared {
             }
             if state.cache.contains_key(&state.center) {
                 while let Some(index) = state.pending.pop_front() {
-                    if index != state.center && !state.cache.contains_key(&index) {
+                    if index != state.center
+                        && !state.cache.contains_key(&index)
+                        && state.in_flight.insert(index)
+                    {
                         return Some(index);
                     }
                 }
@@ -62,21 +73,23 @@ pub(crate) struct ImageLoader {
     result_tx: mpsc::Sender<Completion>,
     result_rx: mpsc::Receiver<Completion>,
     foreground: JoinHandle<()>,
-    background: Option<JoinHandle<()>>,
+    background: Vec<JoinHandle<()>>,
 }
 
 impl ImageLoader {
-    pub fn new(paths: Vec<PathBuf>, radius: usize, display_dr: bool) -> Result<Self> {
-        Self::with_decoder(paths, radius, move |path| {
+    pub fn new(paths: Vec<PathBuf>, radius: usize, jobs: usize, display_dr: bool) -> Result<Self> {
+        let jobs = jobs.min(thread::available_parallelism().map_or(1, usize::from));
+        Self::with_decoder(paths, radius, jobs, move |path| {
             images::decode_with_dr(path, display_dr)
         })
     }
 
-    fn with_decoder<F>(paths: Vec<PathBuf>, radius: usize, decoder: F) -> Result<Self>
+    fn with_decoder<F>(paths: Vec<PathBuf>, radius: usize, jobs: usize, decoder: F) -> Result<Self>
     where
         F: Fn(&Path) -> Result<LoadedImage> + Send + Sync + 'static,
     {
         ensure!(!paths.is_empty(), "cannot load an empty playlist");
+        ensure!(jobs > 0, "preload jobs must be positive");
         let count = paths.len();
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -109,7 +122,8 @@ impl ImageLoader {
                             }
                             state.cache.get(&index).cloned()
                         };
-                        let result = cached.unwrap_or_else(|| shared.store(index, decode(index)));
+                        let result =
+                            cached.unwrap_or_else(|| shared.store(index, decode(index), false));
                         if result_tx.send((generation, result)).is_err() {
                             break;
                         }
@@ -124,21 +138,23 @@ impl ImageLoader {
             result_tx,
             result_rx,
             foreground,
-            background: None,
+            background: Vec::new(),
         };
-        if radius > 0 && count > 1 {
+        for _ in 0..jobs.min(count - 1).min(radius.saturating_mul(2)) {
+            let shared = shared.clone();
+            let decode = decode.clone();
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(1)
                 .thread_name(|_| "preload-pixels".into())
                 .build()
                 .context("starting background pixel worker")?;
-            loader.background = Some(
+            loader.background.push(
                 thread::Builder::new()
                     .name("image-preloader".into())
                     .spawn(move || {
                         while let Some(index) = shared.next_preload() {
                             let result = pool.install(|| decode(index));
-                            drop(shared.store(index, result));
+                            drop(shared.store(index, result, true));
                         }
                     })
                     .context("starting image preloader")?,
@@ -149,22 +165,31 @@ impl ImageLoader {
 
     pub fn request(&self, generation: u64, index: usize) -> Result<()> {
         ensure!(index < self.count, "image index is outside the playlist");
+        let size = self
+            .count
+            .min(self.shared.radius.saturating_mul(2).saturating_add(1));
+        let start = index
+            .saturating_sub(self.shared.radius)
+            .min(self.count - size);
+        let window = start..start + size;
         let cached = {
             let mut state = self.shared.state.lock().expect("image cache lock");
             state.center = index;
             state.generation = generation;
-            state
-                .cache
-                .retain(|&other, _| index.abs_diff(other) <= self.shared.radius);
+            state.window = window.clone();
+            state.cache.retain(|&other, _| window.contains(&other));
             state.pending.clear();
-            for distance in 1..=self.shared.radius.min(self.count - 1) {
+            for distance in 1..size {
                 if let Some(next) = index
                     .checked_add(distance)
-                    .filter(|&next| next < self.count)
+                    .filter(|next| window.contains(next))
                 {
                     state.pending.push_back(next);
                 }
-                if let Some(previous) = index.checked_sub(distance) {
+                if let Some(previous) = index
+                    .checked_sub(distance)
+                    .filter(|previous| window.contains(previous))
+                {
                     state.pending.push_back(previous);
                 }
             }
@@ -190,10 +215,7 @@ impl ImageLoader {
                     "image loader stopped unexpectedly"
                 );
                 ensure!(
-                    !self
-                        .background
-                        .as_ref()
-                        .is_some_and(JoinHandle::is_finished),
+                    !self.background.iter().any(JoinHandle::is_finished),
                     "image preloader stopped unexpectedly"
                 );
                 Ok(None)
@@ -244,7 +266,7 @@ mod tests {
     fn loader(count: usize, radius: usize) -> (ImageLoader, Arc<Vec<AtomicUsize>>) {
         let calls = Arc::new((0..count).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
         let recorded = calls.clone();
-        let loader = ImageLoader::with_decoder(paths(count), radius, move |path| {
+        let loader = ImageLoader::with_decoder(paths(count), radius, 1, move |path| {
             let index = index(path);
             recorded[index].fetch_add(1, Ordering::SeqCst);
             if thread::current().name() == Some("preload-pixels") {
@@ -299,6 +321,35 @@ mod tests {
     }
 
     #[test]
+    fn full_windows_shift_at_both_edges_and_reuse_cached_images() {
+        let (loader, calls) = loader(20, 5);
+        for (generation, (index, expected)) in [
+            (0, 0..11),
+            (1, 0..11),
+            (5, 0..11),
+            (6, 1..12),
+            (19, 9..20),
+            (18, 9..20),
+            (14, 9..20),
+            (13, 8..19),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            loader.request(generation as u64, index).unwrap();
+            receive(&loader, generation as u64).unwrap();
+            cached(&loader, &expected.collect::<Vec<_>>());
+        }
+        for (index, calls) in calls.iter().enumerate() {
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                if index == 8 { 2 } else { 1 },
+                "index {index}"
+            );
+        }
+    }
+
+    #[test]
     fn radius_three_slides_reuses_both_sides_and_releases_evicted_images() {
         let (loader, calls) = loader(12, 3);
         loader.request(0, 4).unwrap();
@@ -329,7 +380,7 @@ mod tests {
     #[test]
     fn preload_zero_keeps_only_current_image_and_starts_no_background_thread() {
         let (loader, calls) = loader(4, 0);
-        assert!(loader.background.is_none());
+        assert!(loader.background.is_empty());
         for (generation, index) in [(0, 0), (1, 1), (2, 0)] {
             loader.request(generation, index).unwrap();
             receive(&loader, generation).unwrap();
@@ -344,22 +395,36 @@ mod tests {
     #[test]
     fn edges_and_very_large_radii_are_bounded_by_the_playlist() {
         let (loader, _) = loader(8, 3);
-        for (generation, index, expected) in [(0, 0, vec![0, 1, 2, 3]), (1, 7, vec![4, 5, 6, 7])] {
+        for (generation, index, expected) in [
+            (0, 0, vec![0, 1, 2, 3, 4, 5, 6]),
+            (1, 7, vec![1, 2, 3, 4, 5, 6, 7]),
+        ] {
             loader.request(generation, index).unwrap();
             receive(&loader, generation).unwrap();
             cached(&loader, &expected);
         }
-        let (wide, _) = self::loader(3, usize::MAX);
-        wide.request(0, 0).unwrap();
-        receive(&wide, 0).unwrap();
-        cached(&wide, &[0, 1, 2]);
+        for radius in [5, usize::MAX] {
+            let (wide, calls) = self::loader(3, radius);
+            for (generation, index) in [(0, 0), (1, 2)] {
+                wide.request(generation, index).unwrap();
+                receive(&wide, generation).unwrap();
+                cached(&wide, &[0, 1, 2]);
+            }
+            assert!(calls.iter().all(|calls| calls.load(Ordering::SeqCst) == 1));
+        }
         let (single, _) = self::loader(1, usize::MAX);
-        assert!(single.background.is_none());
+        assert!(single.background.is_empty());
         single.request(0, 0).unwrap();
         receive(&single, 0).unwrap();
         cached(&single, &[0]);
         assert!(single.request(1, 1).is_err());
-        assert!(ImageLoader::new(Vec::new(), 5, false).is_err());
+        assert!(ImageLoader::new(Vec::new(), 5, 1, false).is_err());
+        assert!(ImageLoader::with_decoder(paths(2), 1, 0, |_| image(0)).is_err());
+        for (count, radius, expected) in [(1, usize::MAX, 0), (3, usize::MAX, 2), (20, 1, 2)] {
+            let loader =
+                ImageLoader::with_decoder(paths(count), radius, usize::MAX, |_| image(0)).unwrap();
+            assert_eq!(loader.background.len(), expected);
+        }
     }
 
     #[test]
@@ -370,8 +435,10 @@ mod tests {
             vec![
                 500_000, 500_001, 499_999, 500_002, 499_998, 500_003, 499_997,
             ],
-            vec![999_999, 999_998, 999_997, 999_996],
-            vec![0, 1, 2, 3],
+            vec![
+                999_999, 999_998, 999_997, 999_996, 999_995, 999_994, 999_993,
+            ],
+            vec![0, 1, 2, 3, 4, 5, 6],
         ]
         .map(|order| {
             let expected = order
@@ -385,7 +452,7 @@ mod tests {
         });
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
-        let loader = ImageLoader::with_decoder(paths, 3, move |path| {
+        let loader = ImageLoader::with_decoder(paths, 3, 1, move |path| {
             let value = index(path);
             recorded.lock().unwrap().push(value);
             image(value)
@@ -407,7 +474,7 @@ mod tests {
             total += actual.len();
             actual.clear();
         }
-        assert_eq!(total, 15);
+        assert_eq!(total, 21);
     }
 
     #[test]
@@ -415,7 +482,7 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let release_rx = Mutex::new(release_rx);
-        let loader = ImageLoader::with_decoder(paths(8), 1, move |path| {
+        let loader = ImageLoader::with_decoder(paths(8), 1, 1, move |path| {
             let index = index(path);
             if index == 1 {
                 started_tx
@@ -453,7 +520,7 @@ mod tests {
         let release_rx = Mutex::new(release_rx);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
-        let loader = ImageLoader::with_decoder(paths(5), 0, move |path| {
+        let loader = ImageLoader::with_decoder(paths(5), 0, 1, move |path| {
             let index = index(path);
             recorded.lock().unwrap().push(index);
             if index == 0 {
@@ -484,7 +551,7 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let release_rx = Mutex::new(release_rx);
-        let loader = ImageLoader::with_decoder(paths(8), 2, move |path| {
+        let loader = ImageLoader::with_decoder(paths(8), 2, 1, move |path| {
             let index = index(path);
             if index == 5 && thread::current().name() == Some("image-loader") {
                 started_tx.send(()).unwrap();
@@ -515,7 +582,7 @@ mod tests {
 
     #[test]
     fn preload_errors_are_cached_and_reported_only_when_selected() {
-        let loader = ImageLoader::with_decoder(paths(2), 1, |path| {
+        let loader = ImageLoader::with_decoder(paths(2), 1, 1, |path| {
             if index(path) == 1 {
                 anyhow::bail!("broken neighbor");
             }
@@ -537,7 +604,7 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let release_rx = Mutex::new(release_rx);
-        let loader = ImageLoader::with_decoder(paths(2), 1, move |path| {
+        let loader = ImageLoader::with_decoder(paths(2), 1, 1, move |path| {
             if index(path) == 1 {
                 started_tx.send(()).unwrap();
                 release_rx
@@ -556,5 +623,110 @@ mod tests {
         drop(loader);
         assert!(start.elapsed() < Duration::from_millis(500));
         release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn parallel_preloads_respect_jobs_and_do_not_block_the_foreground() {
+        for jobs in [1, 2, 4] {
+            let (started_tx, started_rx) = mpsc::channel();
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            let release = gate.clone();
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let running = active.clone();
+            let maximum = peak.clone();
+            let loader = ImageLoader::with_decoder(paths(16), 5, jobs, move |path| {
+                let index = index(path);
+                if thread::current().name() == Some("preload-pixels") {
+                    assert_eq!(rayon::current_num_threads(), 1);
+                    maximum.fetch_max(running.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    started_tx.send(index).unwrap();
+                    let (lock, changed) = &*release;
+                    let (ready, _) = changed
+                        .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |ready| {
+                            !*ready
+                        })
+                        .unwrap();
+                    assert!(*ready);
+                    running.fetch_sub(1, Ordering::SeqCst);
+                }
+                image(index)
+            })
+            .unwrap();
+            loader.request(0, 0).unwrap();
+            receive(&loader, 0).unwrap();
+            let mut started = Vec::new();
+            for _ in 0..jobs {
+                started.push(started_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+            }
+            started.sort_unstable();
+            assert_eq!(started, (1..=jobs).collect::<Vec<_>>());
+            assert_eq!(active.load(Ordering::SeqCst), jobs);
+            assert!(started_rx.try_recv().is_err());
+            loader.request(1, 10).unwrap();
+            assert_eq!(
+                receive(&loader, 1)
+                    .unwrap()
+                    .image
+                    .as_rgba8()
+                    .unwrap()
+                    .get_pixel(0, 0)
+                    .0,
+                [10, 10, 10, 255]
+            );
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+            cached(&loader, &(5..=15).collect::<Vec<_>>());
+            assert_eq!(peak.load(Ordering::SeqCst), jobs);
+        }
+    }
+
+    #[test]
+    fn navigation_deduplicates_background_work_without_waiting_for_it() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = gate.clone();
+        let calls = Arc::new((0..12).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+        let recorded = calls.clone();
+        let loader = ImageLoader::with_decoder(paths(12), 2, 3, move |path| {
+            let index = index(path);
+            recorded[index].fetch_add(1, Ordering::SeqCst);
+            if matches!(index, 3 | 5) && thread::current().name() == Some("preload-pixels") {
+                started_tx.send(index).unwrap();
+                let (lock, changed) = &*release;
+                let (ready, _) = changed
+                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |ready| {
+                        !*ready
+                    })
+                    .unwrap();
+                assert!(*ready);
+            }
+            image(index)
+        })
+        .unwrap();
+        loader.request(0, 4).unwrap();
+        receive(&loader, 0).unwrap();
+        let mut started = [
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        ];
+        started.sort_unstable();
+        assert_eq!(started, [3, 5]);
+        cached(&loader, &[2, 4, 6]);
+        for (generation, index, expected) in [
+            (1, 5, vec![4, 5, 6, 7]),
+            (2, 8, vec![6, 7, 8, 9, 10]),
+            (3, 4, vec![2, 4, 6]),
+        ] {
+            loader.request(generation, index).unwrap();
+            receive(&loader, generation).unwrap();
+            cached(&loader, &expected);
+        }
+        assert!(started_rx.try_recv().is_err());
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        cached(&loader, &[2, 3, 4, 5, 6]);
+        assert_eq!(calls[3].load(Ordering::SeqCst), 1);
+        assert_eq!(calls[5].load(Ordering::SeqCst), 2);
     }
 }

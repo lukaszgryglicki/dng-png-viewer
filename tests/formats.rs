@@ -8,6 +8,8 @@ use rawler::formats::tiff::{DirectoryWriter, Rational, SRational, TiffWriter, Va
 use std::{fs, path::Path};
 use tempfile::tempdir;
 
+mod common;
+
 struct Dng {
     width: u32,
     height: u32,
@@ -18,6 +20,7 @@ struct Dng {
     crop: Option<[u32; 4]>,
     noise_profile: Option<Vec<f64>>,
     preview: bool,
+    exposure: bool,
     samples: Vec<u16>,
 }
 
@@ -33,6 +36,7 @@ impl Dng {
             crop: None,
             noise_profile: None,
             preview: false,
+            exposure: false,
             samples: (0..width * height).map(|n| n as u16).collect(),
         }
     }
@@ -63,8 +67,19 @@ impl Dng {
             }
         }
         let mut writer = TiffWriter::new(fs::File::create(path).unwrap()).unwrap();
+        let exif_offset = self.exposure.then(|| {
+            let mut exif = DirectoryWriter::new();
+            exif.add_tag(34855u16, 65535u16);
+            exif.add_tag(34865u16, 200000u32);
+            exif.add_tag(33434u16, Rational { n: 23, d: 10 });
+            exif.add_tag(33437u16, Rational { n: 14, d: 10 });
+            exif.build(&mut writer).unwrap()
+        });
         let offset = writer.write_data(&bytes).unwrap();
         let mut raw = DirectoryWriter::new();
+        if let Some(offset) = exif_offset {
+            raw.add_tag(34665u16, offset);
+        }
         raw.add_tag(254u16, 0u32);
         raw.add_tag(256u16, self.width);
         raw.add_tag(257u16, self.height);
@@ -114,6 +129,9 @@ impl Dng {
             let raw_offset = raw.build(&mut writer).unwrap();
             let preview_offset = writer.write_data(&[255, 0, 0]).unwrap();
             let mut preview = DirectoryWriter::new();
+            if let Some(offset) = exif_offset {
+                preview.add_tag(34665u16, offset);
+            }
             preview.add_tag(254u16, 1u32);
             preview.add_tag(256u16, 1u32);
             preview.add_tag(257u16, 1u32);
@@ -194,7 +212,7 @@ fn heif(
             }
         }
     }
-    encode_heif(path, &image, format, alpha, orientation);
+    encode_heif(path, &image, format, alpha, orientation, None);
     samples
 }
 
@@ -204,6 +222,7 @@ fn encode_heif(
     format: CompressionFormat,
     alpha: bool,
     orientation: ImageOrientation,
+    exif: Option<&[u8]>,
 ) {
     let library = LibHeif::new_checked().unwrap();
     let mut encoder = library.encoder_for_format(format).unwrap();
@@ -230,10 +249,54 @@ fn encode_heif(
     options.set_save_alpha_channel(alpha);
     options.set_image_orientation(orientation);
     let mut context = HeifContext::new().unwrap();
-    context
+    let handle = context
         .encode_image(image, &mut encoder, Some(options))
         .unwrap();
+    if let Some(exif) = exif {
+        context.add_exif_metadata(&handle, exif).unwrap();
+    }
     context.write_to_file(path.to_str().unwrap()).unwrap();
+}
+
+#[test]
+fn dng_exposure_metadata_is_read_with_and_without_an_embedded_preview() {
+    let dir = tempdir().unwrap();
+    for preview in [false, true] {
+        let mut source = Dng::gray(8, 2);
+        source.exposure = true;
+        source.preview = preview;
+        let path = dir.path().join(format!("exposure-{preview}.dng"));
+        source.write(&path);
+        let image = images::decode(&path).unwrap();
+        assert_eq!(image.exposure.to_string(), "ISO 200K | 2.3s | f1.4");
+        assert_eq!(image.image.as_luma16().unwrap().as_raw(), &source.samples);
+    }
+}
+
+#[test]
+fn heic_and_avif_exposure_metadata_comes_from_the_primary_image() {
+    let dir = tempdir().unwrap();
+    let exif = common::exposure_exif(80000, (1, 250), (63, 10));
+    let mut image = Image::new(64, 32, ColorSpace::Monochrome).unwrap();
+    image.create_plane(Channel::Y, 64, 32, 8).unwrap();
+    image.planes_mut().y.unwrap().data.fill(80);
+    for (extension, format) in [
+        ("heic", CompressionFormat::Hevc),
+        ("avif", CompressionFormat::Av1),
+    ] {
+        let path = dir.path().join(format!("exposure.{extension}"));
+        encode_heif(
+            &path,
+            &image,
+            format,
+            false,
+            ImageOrientation::Normal,
+            Some(&exif),
+        );
+        let loaded = images::decode(&path).unwrap();
+        assert_eq!(loaded.exposure.to_string(), "ISO 80K | 1/250s | f6.3");
+        assert_eq!((loaded.image.width(), loaded.image.height()), (64, 32));
+    }
 }
 
 #[test]
@@ -619,6 +682,7 @@ fn premultiplied_heic_alpha_is_not_applied_twice() {
         CompressionFormat::Hevc,
         true,
         ImageOrientation::Normal,
+        None,
     );
     let decoded = images::decode(&path).unwrap();
     assert!(matches!(decoded.info, Inspection::Standard { .. }));

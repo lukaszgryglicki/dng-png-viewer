@@ -112,7 +112,7 @@ pub fn title(
         } else {
             "FIT"
         };
-        let detail = match &image.info {
+        let mut detail = match &image.info {
             Inspection::Dr(info) => format!(
                 "{mode} | Gray16 {}x{} | {} code bits | window {}-{}",
                 info.width,
@@ -129,10 +129,13 @@ pub fn title(
             let value = dr
                 .snr1_stops
                 .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.1}"));
-            format!("{detail} | DR {value}")
-        } else {
-            detail
+            detail.push_str(&format!(" | DR {value}"));
         }
+        let exposure = image.exposure.to_string();
+        if !exposure.is_empty() {
+            detail.push_str(&format!(" | {exposure}"));
+        }
+        detail
     } else {
         message.to_owned()
     };
@@ -142,6 +145,16 @@ pub fn title(
         paths.len(),
         label(&paths[index])
     )
+}
+
+fn draw_caption(frame: &mut [u8], size: Size, caption: &str, exposure: &str, controls: &str) {
+    if exposure.is_empty() {
+        view::draw_hud(frame, size, &[caption, controls]);
+    } else {
+        let suffix = format!(" | {exposure}");
+        let heading = caption.strip_suffix(&suffix).unwrap_or(caption);
+        view::draw_hud(frame, size, &[heading, exposure, controls]);
+    }
 }
 
 fn window_label(shift: f64) -> String {
@@ -464,7 +477,11 @@ fn run_sdl(
                 } else {
                     "Arrows: previous/next, brighter/darker | Space darkest | Z 1:1 | ESC/Q/Ctrl+C exit"
                 };
-                view::draw_hud(&mut shown, size, &[&caption, controls]);
+                let exposure = image
+                    .as_ref()
+                    .map(|image| image.exposure.to_string())
+                    .unwrap_or_default();
+                draw_caption(&mut shown, size, &caption, &exposure, controls);
             }
             texture
                 .update(None, &shown, size.width as usize * 3)
@@ -485,10 +502,33 @@ fn run_sdl(
     Ok(())
 }
 
-#[cfg(all(test, target_os = "freebsd"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn exposure_has_its_own_hud_row_even_when_the_filename_is_too_long() {
+        let size = Size {
+            width: 640,
+            height: 100,
+        };
+        let heading = format!("dng-png-viewer | {} | FIT", "long-filename".repeat(20));
+        let exposure = "ISO 25K | 1/250s | f6.3";
+        let caption = format!("{heading} | {exposure}");
+        let mut frame = vec![90; size.frame_bytes().unwrap()];
+        draw_caption(&mut frame, size, &caption, exposure, "controls");
+        let mut reference = vec![90; size.frame_bytes().unwrap()];
+        view::draw_hud(&mut reference, size, &[&heading, exposure, "controls"]);
+        assert_eq!(frame, reference);
+
+        let mut frame = vec![90; size.frame_bytes().unwrap()];
+        draw_caption(&mut frame, size, &heading, "", "controls");
+        let mut reference = vec![90; size.frame_bytes().unwrap()];
+        view::draw_hud(&mut reference, size, &[&heading, "controls"]);
+        assert_eq!(frame, reference);
+    }
+
+    #[cfg(target_os = "freebsd")]
     #[test]
     #[ignore = "Run by make test-display on its own Xvfb and PTY; never on a physical console"]
     fn console_input_pipeline() {

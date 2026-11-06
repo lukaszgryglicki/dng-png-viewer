@@ -1,8 +1,9 @@
+use super::Exposure;
 use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageBuffer, Limits};
 use jxl_oxide::{
-    AllocTracker, EnumColourEncoding, InitializeResult, JxlImage, JxlThreadPool, RenderingIntent,
-    image::BitDepth,
+    AllocTracker, AuxBoxData, EnumColourEncoding, InitializeResult, JxlImage, JxlThreadPool,
+    RenderingIntent, image::BitDepth,
 };
 use std::{
     fs::File,
@@ -17,7 +18,7 @@ pub(super) fn is_jpegxl(path: &Path) -> Result<bool> {
     Ok(header.starts_with(b"\xff\x0a") || header.starts_with(b"\0\0\0\x0cJXL \r\n\x87\n"))
 }
 
-pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
+pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
     let mut limits = Limits::default();
     let mut bytes = Vec::new();
     File::open(path)
@@ -102,6 +103,7 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
         ensure!(consumed > 0, "truncated JPEG XL frame");
         offset += consumed;
     }
+    let exposure = read_exposure(&mut image, &bytes, offset);
     // Rendering can retain two RGB grid sets even for grayscale input.
     let input_len = bytes.len();
     drop(bytes);
@@ -129,9 +131,12 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
         for value in &mut samples {
             *value = ((u32::from(*value) * maximum + 32767) / 65535) as u16;
         }
-        return Ok(DynamicImage::ImageLuma16(
-            ImageBuffer::from_vec(width, height, samples)
-                .context("invalid JPEG XL grayscale buffer")?,
+        return Ok((
+            DynamicImage::ImageLuma16(
+                ImageBuffer::from_vec(width, height, samples)
+                    .context("invalid JPEG XL grayscale buffer")?,
+            ),
+            exposure,
         ));
     }
     let channels = stream.channels() as usize;
@@ -161,7 +166,33 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
             target[3] = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
-    Ok(DynamicImage::ImageRgba8(
-        ImageBuffer::from_vec(width, height, pixels).context("invalid JPEG XL display buffer")?,
+    Ok((
+        DynamicImage::ImageRgba8(
+            ImageBuffer::from_vec(width, height, pixels)
+                .context("invalid JPEG XL display buffer")?,
+        ),
+        exposure,
     ))
+}
+
+fn read_exposure(image: &mut JxlImage, bytes: &[u8], mut offset: usize) -> Exposure {
+    while offset < bytes.len() && matches!(image.aux_boxes().first_exif(), Ok(AuxBoxData::Decoding))
+    {
+        let end = bytes.len().min(offset + 4096);
+        match image.feed_bytes(&bytes[offset..end]) {
+            Ok(0) | Err(_) => break,
+            Ok(consumed) => offset += consumed,
+        }
+    }
+    if offset == bytes.len() {
+        let _ = image.finalize();
+    }
+    match image.aux_boxes().first_exif() {
+        Ok(AuxBoxData::Data(exif)) => exif
+            .payload()
+            .get(exif.tiff_header_offset() as usize..)
+            .map(Exposure::from_exif)
+            .unwrap_or_default(),
+        _ => Exposure::default(),
+    }
 }

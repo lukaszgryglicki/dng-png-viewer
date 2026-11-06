@@ -1,3 +1,4 @@
+use super::Exposure;
 use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageBuffer, Limits, metadata::Orientation};
 use jpeg2k::{ColorSpace, DecodeParameters, DumpImage, Image, ImageComponent};
@@ -16,7 +17,7 @@ pub(super) fn is_jpeg2000(path: &Path) -> Result<bool> {
     )
 }
 
-pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
+pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
     let mut limits = Limits::default();
     let mut bytes = Vec::new();
     File::open(path)
@@ -71,8 +72,9 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
                 .context("invalid JPEG2000 display buffer")?,
         )
     };
-    image.apply_orientation(orientation(&bytes)?);
-    Ok(image)
+    let (orientation, exposure) = metadata(&bytes)?;
+    image.apply_orientation(orientation);
+    Ok((image, exposure))
 }
 
 fn layout(image: &Image, mut limits: Limits) -> Result<(u32, u32, bool)> {
@@ -128,9 +130,9 @@ fn sample(component: &ImageComponent, value: i32) -> Result<u16> {
     Ok(value as u16)
 }
 
-fn orientation(mut bytes: &[u8]) -> Result<Orientation> {
+fn metadata(mut bytes: &[u8]) -> Result<(Orientation, Exposure)> {
     if !bytes.starts_with(jpeg2k::format::JP2_RFC3745_MAGIC) {
-        return Ok(Orientation::NoTransforms);
+        return Ok((Orientation::NoTransforms, Exposure::default()));
     }
     while !bytes.is_empty() {
         let header = bytes.get(..8).context("truncated JPEG2000 box")?;
@@ -152,11 +154,12 @@ fn orientation(mut bytes: &[u8]) -> Result<Orientation> {
             .get(header_size..length)
             .context("invalid JPEG2000 box length")?;
         if &header[4..8] == b"uuid" && payload.starts_with(b"JpgTiffExif->JP2") {
-            return Ok(
-                Orientation::from_exif_chunk(&payload[16..]).unwrap_or(Orientation::NoTransforms)
-            );
+            return Ok((
+                Orientation::from_exif_chunk(&payload[16..]).unwrap_or(Orientation::NoTransforms),
+                Exposure::from_exif(&payload[16..]),
+            ));
         }
         bytes = &bytes[length..];
     }
-    Ok(Orientation::NoTransforms)
+    Ok((Orientation::NoTransforms, Exposure::default()))
 }

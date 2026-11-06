@@ -4,6 +4,8 @@ use openjpeg_sys as jp2;
 use std::{ffi::CString, fs, mem::MaybeUninit, path::Path, slice};
 use tempfile::tempdir;
 
+mod common;
+
 struct Fixture {
     width: u32,
     height: u32,
@@ -226,6 +228,34 @@ fn oversized_headers_unsupported_precision_and_corrupt_files_fail() {
     );
     fs::write(&path, jpeg2k::format::J2K_CODESTREAM_MAGIC).unwrap();
     assert!(images::decode(&path).is_err());
+}
+
+#[test]
+fn jp2_exposure_metadata_preserves_native_samples() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("exposure.jp2");
+    let fixture = Fixture::gray(12, false);
+    fixture.write(&path, false);
+    let original = fs::read(&path).unwrap();
+    for (exif, expected) in [
+        (
+            common::exposure_exif(25000, (1, 250), (63, 10)),
+            "ISO 25K | 1/250s | f6.3",
+        ),
+        (b"invalid EXIF".to_vec(), ""),
+    ] {
+        let mut bytes = original.clone();
+        bytes.extend_from_slice(&(24 + exif.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(b"uuidJpgTiffExif->JP2");
+        bytes.extend_from_slice(&exif);
+        fs::write(&path, bytes).unwrap();
+        let loaded = images::decode(&path).unwrap();
+        assert_eq!(loaded.exposure.to_string(), expected);
+        assert_eq!(
+            loaded.image.as_luma16().unwrap().as_raw(),
+            &[0, 1, 2047, 4094, 4095]
+        );
+    }
 }
 
 #[test]

@@ -14,6 +14,9 @@ mod dng;
 mod heif;
 mod jpeg2000;
 mod jpegxl;
+mod metadata;
+
+pub use metadata::Exposure;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -259,6 +262,7 @@ pub struct LoadedImage {
     pub image: DynamicImage,
     pub info: Inspection,
     pub dynamic_range: Option<dng_monochrome::noise::DynamicRange>,
+    pub exposure: Exposure,
 }
 
 impl LoadedImage {
@@ -304,6 +308,7 @@ impl LoadedImage {
                 image,
                 info,
                 dynamic_range: None,
+                exposure: Exposure::default(),
             })
         } else {
             let info = Inspection::Standard {
@@ -318,6 +323,7 @@ impl LoadedImage {
                 image: DynamicImage::ImageRgba8(image.into_rgba8()),
                 info,
                 dynamic_range: None,
+                exposure: Exposure::default(),
             })
         }
     }
@@ -326,8 +332,10 @@ impl LoadedImage {
         image: DynamicImage,
         display_dr: bool,
         calibration: Option<crate::dr::Calibration>,
+        exposure: Exposure,
     ) -> Result<Self> {
         let mut loaded = Self::new(image)?;
+        loaded.exposure = exposure;
         if display_dr {
             let (image, dynamic_range) = crate::dr::estimate(loaded.image, calibration)?;
             loaded.image = image;
@@ -355,27 +363,31 @@ pub fn decode_with_dr(path: &Path, display_dr: bool) -> Result<LoadedImage> {
         path.display()
     );
     if jpeg2000::is_jpeg2000(path)? {
-        return LoadedImage::prepare(jpeg2000::decode(path)?, display_dr, None);
+        let (image, exposure) = jpeg2000::decode(path)?;
+        return LoadedImage::prepare(image, display_dr, None, exposure);
     }
     if jpegxl::is_jpegxl(path)? {
-        return LoadedImage::prepare(jpegxl::decode(path)?, display_dr, None);
+        let (image, exposure) = jpegxl::decode(path)?;
+        return LoadedImage::prepare(image, display_dr, None, exposure);
     }
     if heif::is_heif(path)? {
-        return LoadedImage::prepare(heif::decode(path)?, display_dr, None);
+        let (image, exposure) = heif::decode(path)?;
+        return LoadedImage::prepare(image, display_dr, None, exposure);
     }
     let reader = ImageReader::open(path)
         .with_context(|| format!("opening {:?}", path))?
         .with_guessed_format()
         .context("detecting image format")?;
+    let exposure = Exposure::from_path(path);
     if reader.format() == Some(ImageFormat::Tiff) && dng::is_dng(path)? {
         let (image, calibration) = dng::decode(path, display_dr)?;
-        return LoadedImage::prepare(image, display_dr, calibration);
+        return LoadedImage::prepare(image, display_dr, calibration, exposure);
     }
     let mut decoder = reader.into_decoder().context("opening image decoder")?;
     let orientation = decoder.orientation().context("reading image orientation")?;
     let mut image = DynamicImage::from_decoder(decoder).context("decoding image pixels")?;
     image.apply_orientation(orientation);
-    LoadedImage::prepare(image, display_dr, None)
+    LoadedImage::prepare(image, display_dr, None, exposure)
 }
 
 pub fn inspect(path: &Path) -> Result<Inspection> {

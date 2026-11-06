@@ -3,6 +3,8 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb, Rgba};
 use std::{collections::HashSet, fs, path::Path};
 use tempfile::tempdir;
 
+mod common;
+
 fn png(
     path: &Path,
     width: u32,
@@ -467,6 +469,118 @@ fn animated_gif_displays_its_first_frame() {
         loaded.image.as_rgba8().unwrap().get_pixel(1, 1).0,
         [255, 0, 0, 255]
     );
+}
+
+#[test]
+fn exposure_metadata_is_shown_for_png_jpeg_and_webp() {
+    use dng_png_viewer::{backend, view::View};
+    use image::ImageEncoder;
+
+    fn encode(mut encoder: impl ImageEncoder, exif: Vec<u8>) {
+        encoder.set_exif_metadata(exif).unwrap();
+        encoder
+            .write_image(&[80; 18], 3, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+    }
+
+    let dir = tempdir().unwrap();
+    let exif = common::exposure_exif(25000, (1, 250), (63, 10));
+    for extension in ["png", "jpg", "webp"] {
+        let path = dir.path().join(format!("exposure.{extension}"));
+        let file = fs::File::create(&path).unwrap();
+        match extension {
+            "png" => encode(image::codecs::png::PngEncoder::new(file), exif.clone()),
+            "jpg" => encode(image::codecs::jpeg::JpegEncoder::new(file), exif.clone()),
+            "webp" => encode(
+                image::codecs::webp::WebPEncoder::new_lossless(file),
+                exif.clone(),
+            ),
+            _ => unreachable!(),
+        }
+        for display_dr in [false, true] {
+            let loaded = images::decode_with_dr(&path, display_dr).unwrap();
+            let title = backend::title(
+                0,
+                std::slice::from_ref(&path),
+                Some(&loaded),
+                &View::new(&loaded.info),
+                "",
+            );
+            assert!(title.ends_with("| ISO 25K | 1/250s | f6.3"), "{title}");
+        }
+    }
+}
+
+#[test]
+fn exposure_formats_camera_values_and_omits_unusable_fields_without_changing_gray16() {
+    use image::ImageEncoder;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("exposure.png");
+    let pixels = DynamicImage::ImageLuma16(ImageBuffer::from_pixel(3, 2, Luma([4095])));
+    for (iso, time, aperture, expected) in [
+        (125, (1, 250), (14, 10), "ISO 125 | 1/250s | f1.4"),
+        (600, (1, 1), (63, 10), "ISO 600 | 1s | f6.3"),
+        (1600, (23, 10), (16, 1), "ISO 1600 | 2.3s | f16"),
+        (3200, (60, 1), (22, 1), "ISO 3200 | 60s | f22"),
+        (12500, (2, 500), (12, 10), "ISO 12500 | 1/250s | f1.2"),
+        (50000, (1, 60), (0, 1), "ISO 50K | 1/60s"),
+        (80000, (1, 0), (95, 100), "ISO 80K | f0.95"),
+        (200000, (4, 5), (0, 0), "ISO 200K | 1/1.25s"),
+        (25600, (0, 1), (28, 10), "ISO 25.6K | f2.8"),
+        (0, (0, 0), (0, 1), ""),
+    ] {
+        let mut encoder = image::codecs::png::PngEncoder::new(fs::File::create(&path).unwrap());
+        encoder
+            .set_exif_metadata(common::exposure_exif(iso, time, aperture))
+            .unwrap();
+        encoder
+            .write_image(pixels.as_bytes(), 3, 2, image::ExtendedColorType::L16)
+            .unwrap();
+        for display_dr in [false, true] {
+            let loaded = images::decode_with_dr(&path, display_dr).unwrap();
+            assert_eq!(loaded.exposure.to_string(), expected);
+            assert_eq!(loaded.image.as_luma16(), pixels.as_luma16());
+            assert!(matches!(loaded.info, Inspection::Dr(_)));
+        }
+    }
+}
+
+#[test]
+fn optional_exif_keeps_partial_metadata_and_supports_apex_and_extended_iso() {
+    use image::ImageEncoder;
+    use rawler::formats::tiff::{DirectoryWriter, Rational, SRational};
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("metadata.png");
+    let mut exif = DirectoryWriter::new();
+    exif.add_tag(34855u16, 65535u16);
+    exif.add_tag(34865u16, 200000u32);
+    exif.add_tag(33434u16, Rational { n: 1, d: 0 });
+    exif.add_tag(37377u16, SRational { n: -1, d: 1 });
+    exif.add_tag(33437u16, "wrong type");
+    exif.add_tag(37378u16, Rational { n: 4, d: 1 });
+    let fallback = common::exif_bytes(exif);
+    let mut partial = common::exposure_exif(12500, (1, 250), (14, 10));
+    partial.truncate(partial.len() - 2);
+    let mut overflow = DirectoryWriter::new();
+    overflow.add_tag(34855u16, 65535u16);
+    for (bytes, expected) in [
+        (fallback, "ISO 200K | 2s | f4"),
+        (partial, "ISO 12500 | 1/250s | f1.4"),
+        (common::exif_bytes(overflow), ""),
+        (b"not EXIF".to_vec(), ""),
+        (Vec::new(), ""),
+    ] {
+        let mut encoder = image::codecs::png::PngEncoder::new(fs::File::create(&path).unwrap());
+        encoder.set_exif_metadata(bytes).unwrap();
+        encoder
+            .write_image(&[80; 18], 3, 2, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let loaded = images::decode(&path).unwrap();
+        assert_eq!(loaded.exposure.to_string(), expected);
+        assert_eq!(loaded.image.to_rgb8().as_raw(), &[80; 18]);
+    }
 }
 
 #[test]

@@ -3,6 +3,8 @@ use jxl_sys as jxl;
 use std::{fs, mem::MaybeUninit, ptr};
 use tempfile::tempdir;
 
+mod common;
+
 #[cfg(target_os = "freebsd")]
 #[link(name = "c++")]
 unsafe extern "C" {}
@@ -40,6 +42,10 @@ impl Fixture {
     }
 
     fn encode(&self, container: bool) -> Vec<u8> {
+        self.encode_with_exif(container, None, false)
+    }
+
+    fn encode_with_exif(&self, container: bool, exif: Option<&[u8]>, compressed: bool) -> Vec<u8> {
         assert_eq!(
             self.pixels.len(),
             (self.width * self.height * self.channels) as usize
@@ -56,6 +62,9 @@ impl Fixture {
                 );
             };
             check(jxl::JxlEncoderUseContainer(encoder, i32::from(container)));
+            if exif.is_some() {
+                check(jxl::JxlEncoderUseBoxes(encoder));
+            }
             let mut info = MaybeUninit::uninit();
             jxl::JxlEncoderInitBasicInfo(info.as_mut_ptr());
             let mut info = info.assume_init();
@@ -154,6 +163,15 @@ impl Fixture {
                     settings, &format, pointer, size,
                 ));
             }
+            if let Some(exif) = exif {
+                check(jxl::JxlEncoderAddBox(
+                    encoder,
+                    b"Exif".as_ptr().cast(),
+                    exif.as_ptr(),
+                    exif.len(),
+                    i32::from(compressed),
+                ));
+            }
             jxl::JxlEncoderCloseInput(encoder);
             let mut output = Vec::new();
             let mut buffer = [0; 4096];
@@ -170,6 +188,30 @@ impl Fixture {
             }
             jxl::JxlEncoderDestroy(encoder);
             output
+        }
+    }
+}
+
+#[test]
+fn jpegxl_exposure_reads_trailing_and_compressed_exif_without_changing_the_first_frame() {
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("exposure.jxl");
+    let tiff = common::exposure_exif(50000, (23, 10), (22, 1));
+    let mut exif = 8192u32.to_be_bytes().to_vec();
+    exif.resize(8196, 0);
+    exif.extend_from_slice(&tiff);
+    for compressed in [false, true] {
+        for animation in [false, true] {
+            let mut fixture = Fixture::gray(12);
+            fixture.animation = animation;
+            fs::write(
+                &path,
+                fixture.encode_with_exif(true, Some(&exif), compressed),
+            )
+            .unwrap();
+            let loaded = images::decode(&path).unwrap();
+            assert_eq!(loaded.exposure.to_string(), "ISO 50K | 2.3s | f22");
+            assert_eq!(loaded.image.as_luma16().unwrap().as_raw(), &fixture.pixels);
         }
     }
 }

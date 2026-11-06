@@ -1,3 +1,4 @@
+use super::Exposure;
 use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageBuffer};
 use libheif_rs::{
@@ -21,7 +22,7 @@ pub(super) fn is_heif(path: &Path) -> Result<bool> {
         ))
 }
 
-pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
+pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
     let library = LibHeif::new_checked().context("initializing HEIF codecs")?;
     let file = File::open(path).context("opening HEIF image")?;
     let length = file.metadata()?.len();
@@ -32,6 +33,17 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
     let handle = context
         .primary_image_handle()
         .context("finding primary HEIF image")?;
+    let mut metadata_ids = [0];
+    let exposure = if handle.metadata_block_ids(&mut metadata_ids, u32::from_be_bytes(*b"Exif")) > 0
+    {
+        handle
+            .metadata(metadata_ids[0])
+            .ok()
+            .map(|bytes| Exposure::from_offset_exif(&bytes))
+            .unwrap_or_default()
+    } else {
+        Exposure::default()
+    };
     let monochrome = handle
         .preferred_decoding_colorspace()
         .context("reading HEIF color space")?
@@ -66,9 +78,12 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
             .chunks_exact(2)
             .map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]]))
             .collect();
-        Ok(DynamicImage::ImageLuma16(
-            ImageBuffer::from_vec(width, height, samples)
-                .context("invalid HEIF grayscale buffer")?,
+        Ok((
+            DynamicImage::ImageLuma16(
+                ImageBuffer::from_vec(width, height, samples)
+                    .context("invalid HEIF grayscale buffer")?,
+            ),
+            exposure,
         ))
     } else {
         let plane = decoded
@@ -92,8 +107,11 @@ pub(super) fn decode(path: &Path) -> Result<DynamicImage> {
                 }
             }
         }
-        Ok(DynamicImage::ImageRgba8(
-            ImageBuffer::from_vec(width, height, pixels).context("invalid HEIF RGBA buffer")?,
+        Ok((
+            DynamicImage::ImageRgba8(
+                ImageBuffer::from_vec(width, height, pixels).context("invalid HEIF RGBA buffer")?,
+            ),
+            exposure,
         ))
     }
 }

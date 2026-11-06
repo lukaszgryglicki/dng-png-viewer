@@ -721,10 +721,11 @@ fn directory_errors_and_unsupported_formats_are_explicit() {
         "photo.HEIF",
         "photo.hif",
         "photo.avif",
+        "photo.jxl",
     ] {
         assert!(images::supported_extension(Path::new(name)));
     }
-    for name in ["photo.jxl", "notes.txt"] {
+    for name in ["photo.svg", "notes.txt"] {
         assert!(!images::supported_extension(Path::new(name)));
     }
 }

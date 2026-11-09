@@ -32,7 +32,7 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
         .context("reading JPEG2000 header")?;
     layout(&decoder.img, limits.clone())?;
     decoder.decode().context("decoding JPEG2000 pixels")?;
-    let (width, height, gray16) = layout(&decoder.img, limits)?;
+    let (width, height, gray16, rgb_bits) = layout(&decoder.img, limits)?;
     let components = decoder.img.components();
     // OpenJPEG applies JP2 channel definitions only after decoding.
     let alpha = matches!(components.len(), 2 | 4);
@@ -52,6 +52,29 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
             ImageBuffer::from_vec(width, height, samples)
                 .context("invalid JPEG2000 grayscale buffer")?,
         )
+    } else if rgb_bits > 8 {
+        let maximum = (1u32 << rgb_bits) - 1;
+        let mut pixels = Vec::with_capacity(width as usize * height as usize * components.len());
+        for index in 0..planes[0].len() {
+            for (component, plane) in components.iter().zip(&planes) {
+                let value = u32::from(sample(component, plane[index])?);
+                let source_maximum = (1u32 << component.precision()) - 1;
+                let target_maximum = if component.is_alpha() { 65535 } else { maximum };
+                pixels
+                    .push(((value * target_maximum + source_maximum / 2) / source_maximum) as u16);
+            }
+        }
+        if alpha {
+            DynamicImage::ImageRgba16(
+                ImageBuffer::from_vec(width, height, pixels)
+                    .context("invalid JPEG2000 RGBA buffer")?,
+            )
+        } else {
+            DynamicImage::ImageRgb16(
+                ImageBuffer::from_vec(width, height, pixels)
+                    .context("invalid JPEG2000 RGB buffer")?,
+            )
+        }
     } else {
         let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
         for index in 0..planes[0].len() {
@@ -72,12 +95,19 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
                 .context("invalid JPEG2000 display buffer")?,
         )
     };
+    if !gray16 && components.len() <= 2 {
+        image = if alpha {
+            DynamicImage::ImageLumaA8(image.into_luma_alpha8())
+        } else {
+            DynamicImage::ImageLuma8(image.into_luma8())
+        };
+    }
     let (orientation, exposure) = metadata(&bytes)?;
     image.apply_orientation(orientation);
     Ok((image, exposure))
 }
 
-fn layout(image: &Image, mut limits: Limits) -> Result<(u32, u32, bool)> {
+fn layout(image: &Image, mut limits: Limits) -> Result<(u32, u32, bool, u32)> {
     ensure!(
         (1..=4).contains(&image.num_components()),
         "unsupported JPEG2000 component count"
@@ -107,12 +137,28 @@ fn layout(image: &Image, mut limits: Limits) -> Result<(u32, u32, bool)> {
         "unsupported JPEG2000 component dimensions or precision"
     );
     let gray16 = components.len() == 1 && components[0].precision() > 8;
-    let bytes_per_pixel = u64::from(image.num_components()) * 4 + if gray16 { 2 } else { 4 };
+    let rgb_bits = if components.len() >= 3 {
+        components[..3]
+            .iter()
+            .map(ImageComponent::precision)
+            .max()
+            .unwrap()
+    } else {
+        0
+    };
+    let output_bytes = if gray16 {
+        2
+    } else if rgb_bits > 8 {
+        u64::from(image.num_components()) * 2
+    } else {
+        4
+    };
+    let bytes_per_pixel = u64::from(image.num_components()) * 4 + output_bytes;
     limits.check_dimensions(width, height)?;
     limits
         .reserve(u64::from(count) * bytes_per_pixel)
         .context("JPEG2000 pixels exceed the image allocation limit")?;
-    Ok((width, height, gray16))
+    Ok((width, height, gray16, rgb_bits))
 }
 
 fn sample(component: &ImageComponent, value: i32) -> Result<u16> {

@@ -188,6 +188,7 @@ fn headless_dr_defaults_on_supports_opt_out_and_reports_missing_measurements() {
         assert!(output.status.success(), "{:?}", output.stderr);
         let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(record["image"]["mode"], "dr");
+        assert!(record.get("color_dynamic_range").is_none());
         if !enabled {
             assert!(record.get("dynamic_range").is_none());
         } else {
@@ -208,10 +209,50 @@ fn headless_dr_defaults_on_supports_opt_out_and_reports_missing_measurements() {
     assert_eq!(record["image"]["mode"], "standard");
     assert_eq!(record["dynamic_range"]["method"], "unavailable");
     assert!(record["dynamic_range"]["snr1_stops"].is_null());
+    for channel in ["r", "g", "b"] {
+        assert_eq!(
+            record["color_dynamic_range"][channel]["method"],
+            "unavailable"
+        );
+        assert!(record["color_dynamic_range"][channel]["snr1_stops"].is_null());
+    }
     assert_eq!(
         fs::read(image).unwrap(),
         b"P5\n2 1\n65535\n\x80\x00\x80\x00"
     );
+}
+
+#[test]
+fn headless_native_rgb_reports_four_dr_results_and_opt_out_skips_all_of_them() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("native.ppm");
+    fs::write(&path, b"P6\n1 1\n65535\n\x0f\xff\x03\xff\x00\xff").unwrap();
+    for enabled in [false, true] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dng-png-viewer"))
+            .args(["-analyze", if enabled { "-dr" } else { "-no-dr" }])
+            .arg(&path)
+            .env("SDL_VIDEODRIVER", "not-a-driver")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(record["image"]["mode"], "dr");
+        assert_eq!(record["image"]["code_bits"], 12);
+        assert_eq!(record["image"]["initial_shift"], 4);
+        if enabled {
+            assert_eq!(record["color_dynamic_range"].as_object().unwrap().len(), 3);
+            for channel in ["r", "g", "b"] {
+                assert_eq!(
+                    record["color_dynamic_range"][channel]["method"],
+                    "unavailable"
+                );
+            }
+            assert_eq!(record["dynamic_range"]["method"], "unavailable");
+        } else {
+            assert!(record.get("dynamic_range").is_none());
+            assert!(record.get("color_dynamic_range").is_none());
+        }
+    }
 }
 
 #[test]

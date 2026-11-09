@@ -5,6 +5,11 @@ set(SDL_HIDAPI OFF CACHE BOOL "" FORCE)
 set(SDL_JOYSTICK OFF CACHE BOOL "" FORCE)
 set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
 
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "FreeBSD")
+    # SDL probes evdev before adding the FreeBSD ports include directory.
+    list(APPEND CMAKE_REQUIRED_INCLUDES /usr/local/include)
+endif()
+
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     add_compile_options(-fcommon)
 endif()

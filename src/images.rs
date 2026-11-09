@@ -33,6 +33,7 @@ pub fn supported_extension(path: &Path) -> bool {
                 value.to_ascii_lowercase().as_str(),
                 "png"
                     | "dng"
+                    | "arw"
                     | "heic"
                     | "heif"
                     | "hif"
@@ -262,6 +263,7 @@ pub struct LoadedImage {
     pub image: DynamicImage,
     pub info: Inspection,
     pub dynamic_range: Option<dng_monochrome::noise::DynamicRange>,
+    pub color_dynamic_range: Option<[dng_monochrome::noise::DynamicRange; 3]>,
     pub exposure: Exposure,
 }
 
@@ -269,14 +271,21 @@ impl LoadedImage {
     pub fn new(image: DynamicImage) -> Result<Self> {
         let (width, height) = (image.width(), image.height());
         ensure!(width > 0 && height > 0, "cannot view an empty image");
-        if let DynamicImage::ImageLuma16(pixels) = &image {
+        let native = match &image {
+            DynamicImage::ImageLuma16(pixels) => Some((pixels.as_raw(), 1)),
+            DynamicImage::ImageRgb16(pixels) => Some((pixels.as_raw(), 3)),
+            DynamicImage::ImageRgba16(pixels) => Some((pixels.as_raw(), 4)),
+            _ => None,
+        };
+        if let Some((pixels, channels)) = native {
             let seen = pixels
-                .as_raw()
                 .par_chunks(262144)
                 .map(|chunk| {
                     let mut seen = vec![false; 65536];
-                    for &sample in chunk {
-                        seen[usize::from(sample)] = true;
+                    for (index, &sample) in chunk.iter().enumerate() {
+                        if channels != 4 || index % 4 != 3 {
+                            seen[usize::from(sample)] = true;
+                        }
                     }
                     seen
                 })
@@ -308,6 +317,7 @@ impl LoadedImage {
                 image,
                 info,
                 dynamic_range: None,
+                color_dynamic_range: None,
                 exposure: Exposure::default(),
             })
         } else {
@@ -323,6 +333,7 @@ impl LoadedImage {
                 image: DynamicImage::ImageRgba8(image.into_rgba8()),
                 info,
                 dynamic_range: None,
+                color_dynamic_range: None,
                 exposure: Exposure::default(),
             })
         }
@@ -334,9 +345,13 @@ impl LoadedImage {
         calibration: Option<crate::dr::Calibration>,
         exposure: Exposure,
     ) -> Result<Self> {
+        let color = image.color().has_color();
         let mut loaded = Self::new(image)?;
         loaded.exposure = exposure;
         if display_dr {
+            if color {
+                loaded.color_dynamic_range = Some(crate::dr::estimate_rgb(&loaded.image)?);
+            }
             let (image, dynamic_range) = crate::dr::estimate(loaded.image, calibration)?;
             loaded.image = image;
             loaded.dynamic_range = dynamic_range;
@@ -379,7 +394,11 @@ pub fn decode_with_dr(path: &Path, display_dr: bool) -> Result<LoadedImage> {
         .with_guessed_format()
         .context("detecting image format")?;
     let exposure = Exposure::from_path(path);
-    if reader.format() == Some(ImageFormat::Tiff) && dng::is_dng(path)? {
+    let arw = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("arw"));
+    if reader.format() == Some(ImageFormat::Tiff) && (arw || dng::is_dng(path)?) {
         let (image, calibration) = dng::decode(path, display_dr)?;
         return LoadedImage::prepare(image, display_dr, calibration, exposure);
     }
@@ -402,7 +421,7 @@ impl GrayWindow {
     pub fn new(shift: f64) -> Result<Self> {
         ensure!(
             shift.is_finite() && (0.0..=8.0).contains(&shift),
-            "an 8-bit window in Gray16 requires a finite shift from 0 to 8"
+            "an 8-bit window in 16-bit samples requires a finite shift from 0 to 8"
         );
         Ok(Self {
             scale: (-shift).exp2(),

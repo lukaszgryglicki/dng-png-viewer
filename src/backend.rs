@@ -114,7 +114,12 @@ pub fn title(
         };
         let mut detail = match &image.info {
             Inspection::Dr(info) => format!(
-                "{mode} | Gray16 {}x{} | {} code bits | window {}-{}",
+                "{mode} | {} {}x{} | {} code bits | window {}-{}",
+                if image.image.color().has_color() {
+                    "RGB16"
+                } else {
+                    "Gray16"
+                },
                 info.width,
                 info.height,
                 info.code_bits,
@@ -126,10 +131,21 @@ pub fn title(
             }
         };
         if let Some(dr) = &image.dynamic_range {
-            let value = dr
-                .snr1_stops
-                .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.1}"));
-            detail.push_str(&format!(" | DR {value}"));
+            let value = |dr: &dng_monochrome::noise::DynamicRange| {
+                dr.snr1_stops
+                    .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.1}"))
+            };
+            if let Some([red, green, blue]) = &image.color_dynamic_range {
+                detail.push_str(&format!(
+                    " | DR R {} G {} B {} Y {}",
+                    value(red),
+                    value(green),
+                    value(blue),
+                    value(dr)
+                ));
+            } else {
+                detail.push_str(&format!(" | DR {}", value(dr)));
+            }
         }
         let exposure = image.exposure.to_string();
         if !exposure.is_empty() {

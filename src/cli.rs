@@ -13,7 +13,7 @@ use std::{
 };
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Native fullscreen Gray16 bit-window viewer for macOS, X11 and KMSDRM consoles.",
+#[command(version, about = "Native fullscreen Gray16/RGB16 bit-window viewer with DNG/ARW support for macOS, X11 and KMSDRM consoles.",
     group(ArgGroup::new("sources").required(true).multiple(true).args(["images", "directories"])),
     after_help = "Fit mode: LEFT/RIGHT previous/next; UP brighter, DOWN darker; SPACE resets to darkest; Z native 1:1.\n\
         Native mode: arrows pan toward the requested image edge; SPACE centers; X returns to fit.\n\
@@ -49,7 +49,7 @@ pub struct Cli {
         long,
         visible_alias = "dr",
         overrides_with_all = ["display_dr", "no_display_dr"],
-        help = "Calculate and display noise-based DR for every image using dng-monochrome's estimator (default)"
+        help = "Display noise-based DR, or R/G/B/luminance DR for color, using dng-monochrome's estimator (default)"
     )]
     pub display_dr: bool,
     #[arg(
@@ -189,6 +189,11 @@ impl Cli {
                         let mut record = serde_json::json!({"source": path.to_string_lossy(), "image": image.info});
                         if display_dr {
                             record["dynamic_range"] = serde_json::to_value(image.dynamic_range)?;
+                            if let Some([red, green, blue]) = image.color_dynamic_range {
+                                record["color_dynamic_range"] = serde_json::json!({
+                                    "r": red, "g": green, "b": blue,
+                                });
+                            }
                         }
                         serde_json::to_writer(io::stdout().lock(), &record)?;
                         writeln!(io::stdout().lock())?;

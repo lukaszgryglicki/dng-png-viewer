@@ -146,7 +146,7 @@ fn all_65536_native_codes_survive_without_rescaling() {
 }
 
 #[test]
-fn rgb_and_alpha_are_standard_display_with_full_range() {
+fn rgb_retains_native_depth_and_alpha_uses_full_range() {
     let tmp = tempdir().unwrap();
     for bits in [8, 12, 16] {
         for channels in 2..=4 {
@@ -171,6 +171,24 @@ fn rgb_and_alpha_are_standard_display_with_full_range() {
             let path = tmp.path().join(format!("{bits}-{channels}.jp2"));
             fixture.write(&path, false);
             let loaded = images::decode(&path).unwrap();
+            if bits > 8 && channels >= 3 {
+                let Inspection::Dr(info) = loaded.info else {
+                    panic!()
+                };
+                assert_eq!(info.code_bits, bits);
+                let expected = [maximum as u16, 0, (maximum / 2 + 1) as u16];
+                if channels == 3 {
+                    assert_eq!(loaded.image.as_rgb16().unwrap().as_raw(), &expected);
+                } else {
+                    let opacity =
+                        ((maximum / 2 + 1) as u32 * 65535 + maximum as u32 / 2) / maximum as u32;
+                    assert_eq!(
+                        loaded.image.as_rgba16().unwrap().as_raw(),
+                        &[expected[0], expected[1], expected[2], opacity as u16]
+                    );
+                }
+                continue;
+            }
             assert!(matches!(loaded.info, Inspection::Standard { .. }));
             let expected = match channels {
                 2 => [255, 255, 255, 128],
@@ -178,6 +196,40 @@ fn rgb_and_alpha_are_standard_display_with_full_range() {
                 _ => [255, 0, 128, 128],
             };
             assert_eq!(loaded.image.as_rgba8().unwrap().as_raw(), &expected);
+        }
+    }
+}
+
+#[test]
+fn signed_and_unsigned_rgb_preserve_every_native_channel_code() {
+    let tmp = tempdir().unwrap();
+    for bits in [9, 10, 12, 16] {
+        let maximum = (1i32 << bits) - 1;
+        let expected: Vec<u16> = (0..=maximum)
+            .flat_map(|value| [value, maximum - value, (value * 31) & maximum].map(|v| v as u16))
+            .collect();
+        for signed in [false, true] {
+            let mut fixture = Fixture::gray(bits, signed);
+            fixture.width = 256;
+            fixture.height = (maximum as u32 + 1) / 256;
+            fixture.color = jp2::COLOR_SPACE::OPJ_CLRSPC_SRGB;
+            let offset = if signed { 1 << (bits - 1) } else { 0 };
+            fixture.planes = (0..3)
+                .map(|channel| {
+                    expected
+                        .chunks_exact(3)
+                        .map(|pixel| i32::from(pixel[channel]) - offset)
+                        .collect()
+                })
+                .collect();
+            let path = tmp.path().join(format!("rgb-{bits}-{signed}.jp2"));
+            fixture.write(&path, false);
+            let loaded = images::decode(&path).unwrap();
+            assert_eq!(loaded.image.as_rgb16().unwrap().as_raw(), &expected);
+            let Inspection::Dr(info) = loaded.info else {
+                panic!()
+            };
+            assert_eq!((info.code_bits, info.max_shift), (bits, bits - 8));
         }
     }
 }

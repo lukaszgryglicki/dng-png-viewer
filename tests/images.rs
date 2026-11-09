@@ -117,29 +117,108 @@ fn standard_image_dr_accounts_for_alpha_and_matches_the_existing_eight_bit_displ
             assert!(measured.dynamic_range.unwrap().snr1_stops.is_none());
         }
     }
-    let path = dir.path().join("rgb16.png");
-    DynamicImage::ImageRgb16(ImageBuffer::from_fn(256, 128, |x, y| {
-        let value = u16::from(samples[(y * 256 + x) as usize]) * 257;
-        Rgb([value, value, value])
-    }))
-    .save(&path)
-    .unwrap();
-    let plain = images::decode(&path).unwrap();
-    let reference = dir.path().join("display8.png");
-    plain.image.save(&reference).unwrap();
-    let measured = images::decode_with_dr(&path, true).unwrap();
-    assert_eq!(measured.info, plain.info);
-    assert_eq!(measured.image.as_rgba8(), plain.image.as_rgba8());
-    assert_eq!(
-        serde_json::to_value(measured.dynamic_range.unwrap()).unwrap(),
-        serde_json::to_value(
-            images::decode_with_dr(&reference, true)
-                .unwrap()
-                .dynamic_range
-                .unwrap()
-        )
-        .unwrap()
-    );
+}
+
+#[test]
+fn rgb_dr_matches_three_independent_channels_and_native_luminance_with_alpha() {
+    let dir = tempdir().unwrap();
+    for bits in [8, 16] {
+        let maximum = if bits == 8 { 255u32 } else { 65535 };
+        let mut random = fastrand::Rng::with_seed(4109);
+        let samples: Vec<[u16; 3]> = (0..256 * 128)
+            .map(|index| {
+                std::array::from_fn(|channel| {
+                    let (base, step, noise) = if bits == 8 {
+                        (20, 12, [1, 3, 7][channel])
+                    } else {
+                        (2000, 3500, [40, 200, 600][channel])
+                    };
+                    (base + (index % 256 / 16) * step + random.i32(-noise..=noise)) as u16
+                })
+            })
+            .collect();
+        for alpha in [None, Some(maximum / 2 + 1), Some(0)] {
+            let image = match (bits, alpha) {
+                (8, None) => DynamicImage::ImageRgb8(ImageBuffer::from_fn(256, 128, |x, y| {
+                    Rgb(samples[(y * 256 + x) as usize].map(|value| value as u8))
+                })),
+                (8, Some(alpha)) => {
+                    DynamicImage::ImageRgba8(ImageBuffer::from_fn(256, 128, |x, y| {
+                        let [r, g, b] = samples[(y * 256 + x) as usize].map(|value| value as u8);
+                        Rgba([r, g, b, alpha as u8])
+                    }))
+                }
+                (_, None) => DynamicImage::ImageRgb16(ImageBuffer::from_fn(256, 128, |x, y| {
+                    Rgb(samples[(y * 256 + x) as usize])
+                })),
+                (_, Some(alpha)) => {
+                    DynamicImage::ImageRgba16(ImageBuffer::from_fn(256, 128, |x, y| {
+                        let [r, g, b] = samples[(y * 256 + x) as usize];
+                        Rgba([r, g, b, alpha as u16])
+                    }))
+                }
+            };
+            let path = dir.path().join("rgb.png");
+            image.save(&path).unwrap();
+            let plain = images::decode(&path).unwrap();
+            let measured = images::decode_with_dr(&path, true).unwrap();
+            assert_eq!(measured.info, plain.info);
+            assert_eq!(measured.image.as_bytes(), plain.image.as_bytes());
+            assert!(plain.color_dynamic_range.is_none() && plain.dynamic_range.is_none());
+            if bits == 16 {
+                assert!(matches!(measured.info, Inspection::Dr(_)));
+                assert_eq!(measured.image.color(), image.color());
+                assert_eq!(measured.image.as_bytes(), image.as_bytes());
+            } else {
+                assert!(matches!(measured.info, Inspection::Standard { .. }));
+            }
+            let ranges = measured.color_dynamic_range.as_ref().unwrap();
+            if alpha != Some(0) {
+                assert!(ranges[0].snr1_stops.unwrap() > ranges[2].snr1_stops.unwrap());
+            }
+            for component in 0..4 {
+                let plane: Vec<u16> = samples
+                    .iter()
+                    .map(|pixel| {
+                        let [r, g, b] = pixel.map(|value| {
+                            (u32::from(value) * alpha.unwrap_or(maximum) + maximum / 2) / maximum
+                        });
+                        if component == 3 {
+                            ((2126 * r + 7152 * g + 722 * b) / 10000) as u16
+                        } else {
+                            [r, g, b][component] as u16
+                        }
+                    })
+                    .collect();
+                let reference = if bits == 8 {
+                    DynamicImage::ImageLuma8(
+                        ImageBuffer::from_vec(
+                            256,
+                            128,
+                            plane.into_iter().map(|value| value as u8).collect(),
+                        )
+                        .unwrap(),
+                    )
+                } else {
+                    DynamicImage::ImageLuma16(ImageBuffer::from_vec(256, 128, plane).unwrap())
+                };
+                let reference_path = dir.path().join("reference.png");
+                reference.save(&reference_path).unwrap();
+                let reference = images::decode_with_dr(&reference_path, true).unwrap();
+                assert!(reference.color_dynamic_range.is_none());
+                let actual = if component == 3 {
+                    measured.dynamic_range.as_ref().unwrap()
+                } else {
+                    &ranges[component]
+                };
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(reference.dynamic_range.unwrap()).unwrap(),
+                    "{bits} bits, alpha {alpha:?}, component {component}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -271,7 +350,7 @@ fn parallel_histogram_merges_chunks_exactly() {
 }
 
 #[test]
-fn ordinary_png_variants_do_not_enable_dr() {
+fn png_variants_preserve_native_rgb_and_standard_fallbacks() {
     let dir = tempdir().unwrap();
     for (name, color, depth, data) in [
         (
@@ -326,6 +405,22 @@ fn ordinary_png_variants_do_not_enable_dr() {
         let path = dir.path().join(format!("{name}.png"));
         png(&path, 2, 1, color, depth, &data);
         let loaded = images::decode(&path).unwrap();
+        if depth == png::BitDepth::Sixteen
+            && matches!(color, png::ColorType::Rgb | png::ColorType::Rgba)
+        {
+            assert!(matches!(loaded.info, Inspection::Dr(_)), "{name}");
+            let actual = match &loaded.image {
+                DynamicImage::ImageRgb16(image) => image.as_raw(),
+                DynamicImage::ImageRgba16(image) => image.as_raw(),
+                _ => panic!("missing native RGB data: {name}"),
+            };
+            let expected: Vec<_> = data
+                .chunks_exact(2)
+                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .collect();
+            assert_eq!(*actual, expected);
+            continue;
+        }
         assert!(
             matches!(
                 loaded.info,
@@ -412,23 +507,28 @@ fn ordinary_codecs_decode_without_external_programs() {
         data.save_with_format(&path, format).unwrap();
         assert!(images::supported_extension(&path));
         let loaded = images::decode(&path).unwrap();
-        assert!(
-            matches!(
-                loaded.info,
-                Inspection::Standard {
-                    width: 4,
-                    height: 3,
-                    ..
-                }
-            ),
-            "{extension}"
-        );
-        assert!(loaded.image.as_rgba8().is_some(), "{extension}");
+        if format == ImageFormat::Farbfeld {
+            assert!(matches!(loaded.info, Inspection::Dr(_)));
+            assert_eq!(loaded.image.as_rgba16(), data.as_rgba16());
+        } else {
+            assert!(
+                matches!(
+                    loaded.info,
+                    Inspection::Standard {
+                        width: 4,
+                        height: 3,
+                        ..
+                    }
+                ),
+                "{extension}"
+            );
+            assert!(loaded.image.as_rgba8().is_some(), "{extension}");
+        }
         let measured = images::decode_with_dr(&path, true).unwrap();
         assert_eq!(measured.info, loaded.info, "{extension}");
         assert_eq!(
-            measured.image.as_rgba8(),
-            loaded.image.as_rgba8(),
+            measured.image.as_bytes(),
+            loaded.image.as_bytes(),
             "{extension}"
         );
         assert!(

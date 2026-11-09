@@ -84,6 +84,7 @@ pub(crate) fn estimate(
     calibration: Option<Calibration>,
 ) -> Result<(DynamicImage, Option<DynamicRange>)> {
     let (width, height) = (image.width(), image.height());
+    let storage_bits = if image.as_rgba8().is_some() { 8 } else { 16 };
     let (pixels, calibration, original) = match image {
         DynamicImage::ImageLuma16(pixels) => {
             (pixels.into_raw(), calibration.unwrap_or_default(), None)
@@ -93,30 +94,85 @@ pub(crate) fn estimate(
                 calibration.is_none(),
                 "DNG DR calibration requires native Gray16 samples"
             );
-            let pixels = image
-                .as_rgba8()
-                .context("expected standard RGBA8 display pixels for luminance DR")?
-                .as_raw()
-                .par_chunks_exact(4)
-                .map(|pixel| {
-                    let alpha = u16::from(pixel[3]);
-                    let rgb = Rgb(std::array::from_fn(|channel| {
-                        ((u16::from(pixel[channel]) * alpha + 127) / 255) as u8
-                    }));
-                    u16::from(rgb.to_luma().0[0])
-                })
-                .collect();
+            let pixels = color_samples(&image, None)?;
             (
                 pixels,
                 Calibration {
                     black: 0.0,
-                    white: 255,
+                    white: if storage_bits == 8 { 255 } else { u16::MAX },
                     noise_profile: None,
                 },
                 Some(image),
             )
         }
     };
+    let (pixels, dynamic_range) = estimate_plane(pixels, width, height, calibration, storage_bits)?;
+    let image = match original {
+        Some(image) => image,
+        None => DynamicImage::ImageLuma16(
+            ImageBuffer::from_vec(width, height, pixels)
+                .context("restoring grayscale pixels after DR estimation")?,
+        ),
+    };
+    Ok((image, Some(dynamic_range)))
+}
+
+pub(crate) fn estimate_rgb(image: &DynamicImage) -> Result<[DynamicRange; 3]> {
+    let storage_bits = if image.as_rgba8().is_some() { 8 } else { 16 };
+    let [red, green, blue] = [0, 1, 2].map(|channel| {
+        let (_, range) = estimate_plane(
+            color_samples(image, Some(channel))?,
+            image.width(),
+            image.height(),
+            Calibration {
+                white: if storage_bits == 8 { 255 } else { u16::MAX },
+                ..Calibration::default()
+            },
+            storage_bits,
+        )?;
+        Ok::<_, anyhow::Error>(range)
+    });
+    Ok([red?, green?, blue?])
+}
+
+fn color_samples(image: &DynamicImage, channel: Option<usize>) -> Result<Vec<u16>> {
+    if let Some(pixels) = image.as_rgba8() {
+        return Ok(pixels
+            .as_raw()
+            .par_chunks_exact(4)
+            .map(|pixel| {
+                let alpha = u16::from(pixel[3]);
+                let rgb = Rgb(std::array::from_fn(|component| {
+                    ((u16::from(pixel[component]) * alpha + 127) / 255) as u8
+                }));
+                u16::from(channel.map_or_else(|| rgb.to_luma().0[0], |channel| rgb.0[channel]))
+            })
+            .collect());
+    }
+    let (pixels, channels) = match image {
+        DynamicImage::ImageRgb16(pixels) => (pixels.as_raw(), 3),
+        DynamicImage::ImageRgba16(pixels) => (pixels.as_raw(), 4),
+        _ => anyhow::bail!("color DR requires prepared RGB/RGBA pixels"),
+    };
+    Ok(pixels
+        .par_chunks_exact(channels)
+        .map(|pixel| {
+            let alpha = u32::from(pixel.get(3).copied().unwrap_or(u16::MAX));
+            let rgb = Rgb(std::array::from_fn(|component| {
+                ((u32::from(pixel[component]) * alpha + 32767) / 65535) as u16
+            }));
+            channel.map_or_else(|| rgb.to_luma().0[0], |channel| rgb.0[channel])
+        })
+        .collect())
+}
+
+fn estimate_plane(
+    pixels: Vec<u16>,
+    width: u32,
+    height: u32,
+    calibration: Calibration,
+    storage_bits: usize,
+) -> Result<(Vec<u16>, DynamicRange)> {
     let input = MonoImage {
         pixels,
         metadata: SensorMetadata {
@@ -128,7 +184,7 @@ pub(crate) fn estimate(
             height: height as usize,
             crop: [0, 0, width as usize, height as usize],
             orientation: 1,
-            storage_bits: if original.is_some() { 8 } else { 16 },
+            storage_bits,
             black_level: calibration.black,
             white_level: calibration.white,
             iso: None,
@@ -146,12 +202,5 @@ pub(crate) fn estimate(
     let dynamic_range = range::analyze(&input, &histogram, RangeOptions::default())
         .context("estimating noise-limited DR")?
         .dynamic_range;
-    let image = match original {
-        Some(image) => image,
-        None => DynamicImage::ImageLuma16(
-            ImageBuffer::from_vec(width, height, input.pixels)
-                .context("restoring grayscale pixels after DR estimation")?,
-        ),
-    };
-    Ok((image, Some(dynamic_range)))
+    Ok((input.pixels, dynamic_range))
 }

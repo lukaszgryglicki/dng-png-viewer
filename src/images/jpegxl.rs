@@ -70,6 +70,13 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
             }
         );
     let bits = metadata.bit_depth.bits_per_sample();
+    let rgb16 = !image.pixel_format().is_grayscale()
+        && matches!(
+            metadata.bit_depth,
+            BitDepth::IntegerSample {
+                bits_per_sample: 9..=16
+            }
+        );
     let associated_alpha = metadata
         .ec_info
         .iter()
@@ -84,7 +91,16 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
     limits
         .reserve(
             sample_bytes
-                .checked_add(u64::from(count) * if gray16 { 2 } else { 4 })
+                .checked_add(
+                    u64::from(count)
+                        * if gray16 {
+                            2
+                        } else if rgb16 {
+                            8
+                        } else {
+                            4
+                        },
+                )
                 .context("JPEG XL allocation size overflow")?,
         )
         .context("JPEG XL pixels exceed the image allocation limit")?;
@@ -145,6 +161,51 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
         "unsupported JPEG XL display layout"
     );
     let alpha = matches!(channels, 2 | 4);
+    if rgb16 {
+        ensure!((3..=4).contains(&channels), "unexpected JPEG XL RGB layout");
+        let maximum = ((1u32 << bits) - 1) as f32;
+        let mut pixels = vec![0u16; count as usize * channels];
+        let mut row = vec![0f32; width as usize * channels];
+        for output in pixels.chunks_exact_mut(width as usize * channels) {
+            ensure!(
+                stream.write_to_buffer(&mut row) == row.len(),
+                "incomplete JPEG XL high-depth RGB buffer"
+            );
+            for (source, target) in row
+                .chunks_exact(channels)
+                .zip(output.chunks_exact_mut(channels))
+            {
+                let opacity = if alpha { source[3] } else { 1.0 };
+                let scale = if associated_alpha {
+                    if opacity > 0.0 {
+                        maximum / opacity
+                    } else {
+                        0.0
+                    }
+                } else {
+                    maximum
+                };
+                for channel in 0..3 {
+                    target[channel] = (source[channel] * scale).round().clamp(0.0, maximum) as u16;
+                }
+                if alpha {
+                    target[3] = (opacity * 65535.0).round().clamp(0.0, 65535.0) as u16;
+                }
+            }
+        }
+        let image = if alpha {
+            DynamicImage::ImageRgba16(
+                ImageBuffer::from_vec(width, height, pixels)
+                    .context("invalid JPEG XL high-depth RGBA buffer")?,
+            )
+        } else {
+            DynamicImage::ImageRgb16(
+                ImageBuffer::from_vec(width, height, pixels)
+                    .context("invalid JPEG XL high-depth RGB buffer")?,
+            )
+        };
+        return Ok((image, exposure));
+    }
     let mut pixels = vec![0; count as usize * 4];
     let mut row = vec![0f32; width as usize * channels];
     for output in pixels.chunks_exact_mut(width as usize * 4) {
@@ -166,13 +227,15 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
             target[3] = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
-    Ok((
-        DynamicImage::ImageRgba8(
-            ImageBuffer::from_vec(width, height, pixels)
-                .context("invalid JPEG XL display buffer")?,
-        ),
-        exposure,
-    ))
+    let image = DynamicImage::ImageRgba8(
+        ImageBuffer::from_vec(width, height, pixels).context("invalid JPEG XL display buffer")?,
+    );
+    let image = match channels {
+        1 => DynamicImage::ImageLuma8(image.into_luma8()),
+        2 => DynamicImage::ImageLumaA8(image.into_luma_alpha8()),
+        _ => image,
+    };
+    Ok((image, exposure))
 }
 
 fn read_exposure(image: &mut JxlImage, bytes: &[u8], mut offset: usize) -> Exposure {

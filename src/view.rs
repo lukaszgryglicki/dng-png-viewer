@@ -217,6 +217,19 @@ pub fn render_with_downsample(
             let value = window.sample(pixels.get_pixel(x, y).0[0]);
             [value, value, value, 255]
         }),
+        DynamicImage::ImageRgb16(pixels) => draw(&mut frame, size, layout, downsample, |x, y| {
+            let [r, g, b] = pixels.get_pixel(x, y).0.map(|value| window.sample(value));
+            [r, g, b, 255]
+        }),
+        DynamicImage::ImageRgba16(pixels) => draw(&mut frame, size, layout, downsample, |x, y| {
+            let [r, g, b, alpha] = pixels.get_pixel(x, y).0;
+            [
+                window.sample(r),
+                window.sample(g),
+                window.sample(b),
+                ((u32::from(alpha) * 255 + 32767) / 65535) as u8,
+            ]
+        }),
         DynamicImage::ImageRgba8(pixels) => draw(&mut frame, size, layout, downsample, |x, y| {
             pixels.get_pixel(x, y).0
         }),

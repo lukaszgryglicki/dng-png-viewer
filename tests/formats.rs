@@ -490,7 +490,7 @@ fn optional_dr_rejects_invalid_noise_profiles_without_affecting_plain_viewing() 
 }
 
 #[test]
-fn color_linear_and_cfa_dngs_are_developed_without_dr_controls() {
+fn color_linear_and_cfa_dngs_keep_high_depth_rgb_crop_and_orientation() {
     let directory = tempdir().unwrap();
     for cfa in [false, true] {
         let mut source = Dng::gray(24, 16);
@@ -512,34 +512,23 @@ fn color_linear_and_cfa_dngs_are_developed_without_dr_controls() {
         let path = directory.path().join(format!("color-{cfa}.dng"));
         source.write(&path);
         let decoded = images::decode(&path).unwrap();
-        assert!(matches!(
-            decoded.info,
-            Inspection::Standard {
-                width: 24,
-                height: 16,
-                ..
-            }
-        ));
-        let pixel = decoded.image.as_rgba8().unwrap().get_pixel(12, 8).0;
+        assert!(matches!(decoded.info, Inspection::Dr(_)));
+        assert_eq!((decoded.image.width(), decoded.image.height()), (24, 16));
+        let pixel = decoded.image.as_rgb16().unwrap().get_pixel(12, 8).0;
         assert!(pixel[0] > pixel[1] && pixel[0] > pixel[2], "{pixel:?}");
         let measured = images::decode_with_dr(&path, true).unwrap();
         assert!(measured.dynamic_range.unwrap().snr1_stops.is_none());
         assert_eq!(decoded.info, measured.info);
-        assert_eq!(decoded.image.as_rgba8(), measured.image.as_rgba8());
+        assert_eq!(decoded.image.as_rgb16(), measured.image.as_rgb16());
+        assert!(measured.color_dynamic_range.is_some());
 
         source.crop = Some([2, 2, 20, 12]);
         source.orientation = 6;
         let cropped = directory.path().join(format!("cropped-color-{cfa}.dng"));
         source.write(&cropped);
         let decoded = images::decode(&cropped).unwrap();
-        assert!(matches!(
-            decoded.info,
-            Inspection::Standard {
-                width: 12,
-                height: 20,
-                ..
-            }
-        ));
+        assert!(matches!(decoded.info, Inspection::Dr(_)));
+        assert_eq!((decoded.image.width(), decoded.image.height()), (12, 20));
     }
 }
 
@@ -586,50 +575,132 @@ fn high_bit_depth_monochrome_heic_and_avif_preserve_decoded_codes() {
 }
 
 #[test]
-fn color_and_alpha_heic_including_ten_and_twelve_bits_use_standard_display() {
+fn color_heif_retains_native_precision_and_alpha_without_changing_standard_images() {
     let directory = tempdir().unwrap();
-    for (bits, color, alpha) in [
-        (8, false, false),
-        (8, true, false),
-        (10, true, false),
-        (12, true, false),
-        (8, false, true),
-        (10, false, true),
-        (12, false, true),
-        (8, true, true),
-    ] {
-        let path = directory
-            .path()
-            .join(format!("normal-{bits}-{color}-{alpha}.heif"));
-        heif(
-            &path,
-            bits,
-            color,
-            alpha,
-            CompressionFormat::Hevc,
-            ImageOrientation::Normal,
-        );
-        let decoded =
-            images::decode(&path).unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
-        assert!(matches!(
-            decoded.info,
-            Inspection::Standard {
-                width: 65,
-                height: 17,
-                ..
+    for format in [CompressionFormat::Hevc, CompressionFormat::Av1] {
+        for (bits, color, alpha) in [
+            (8, false, false),
+            (8, true, false),
+            (10, true, false),
+            (12, true, false),
+            (8, false, true),
+            (10, false, true),
+            (12, false, true),
+            (8, true, true),
+            (10, true, true),
+            (12, true, true),
+        ] {
+            let path = directory
+                .path()
+                .join(format!("normal-{bits}-{color}-{alpha}.heif"));
+            heif(&path, bits, color, alpha, format, ImageOrientation::Normal);
+            let decoded = images::decode(&path)
+                .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+            if bits > 8 && color {
+                assert!(matches!(decoded.info, Inspection::Dr(_)));
+                let pixels = decoded.image.to_rgba16();
+                assert_eq!(pixels.dimensions(), (65, 17));
+                let maximum = (1u16 << bits) - 1;
+                assert!(
+                    pixels
+                        .pixels()
+                        .all(|pixel| pixel.0[..3].iter().all(|&v| v <= maximum))
+                );
+                assert!(
+                    pixels
+                        .pixels()
+                        .any(|pixel| pixel[0] != pixel[1] || pixel[1] != pixel[2])
+                );
+                assert!((0..3).any(|channel| {
+                    pixels
+                        .pixels()
+                        .map(|pixel| pixel[channel])
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        > 256
+                }));
+                if alpha {
+                    assert!((32500..=33000).contains(&pixels.get_pixel(20, 8)[3]));
+                } else {
+                    assert!(pixels.pixels().all(|pixel| pixel[3] == 65535));
+                }
+                continue;
             }
-        ));
-        let pixels = decoded.image.as_rgba8().unwrap();
-        assert!(pixels.pixels().any(|p| p.0[..3].iter().any(|&v| v > 0)));
-        if color {
-            assert!(pixels.pixels().any(|p| p[0] != p[1] || p[1] != p[2]));
-        }
-        if alpha {
-            assert!((127..=129).contains(&pixels.get_pixel(20, 8)[3]));
-        } else {
-            assert!(pixels.pixels().all(|p| p[3] == 255));
+            assert!(matches!(
+                decoded.info,
+                Inspection::Standard {
+                    width: 65,
+                    height: 17,
+                    ..
+                }
+            ));
+            let pixels = decoded.image.as_rgba8().unwrap();
+            assert!(pixels.pixels().any(|p| p.0[..3].iter().any(|&v| v > 0)));
+            if color {
+                assert!(pixels.pixels().any(|p| p[0] != p[1] || p[1] != p[2]));
+            }
+            if alpha {
+                assert!((127..=129).contains(&pixels.get_pixel(20, 8)[3]));
+            } else {
+                assert!(pixels.pixels().all(|p| p[3] == 255));
+            }
         }
     }
+}
+
+#[test]
+fn arw_extensions_are_discovered_and_dispatch_raw_data_without_a_color_flag() {
+    use dng_png_viewer::images::Source;
+    let directory = tempdir().unwrap();
+    for extension in ["arw", "ARW", "ArW"] {
+        let path = directory.path().join(format!("raw.{extension}"));
+        Dng::gray(8, 8).write(&path);
+        assert!(images::supported_extension(&path));
+        let decoded = images::decode(&path).unwrap();
+        assert!(decoded.image.as_luma16().is_some());
+    }
+    assert_eq!(
+        images::discover(&[Source::Directory(directory.path().to_owned())])
+            .unwrap()
+            .len(),
+        3
+    );
+    let corrupt = directory.path().join("broken.ARW");
+    fs::write(&corrupt, b"not raw data").unwrap();
+    assert!(images::decode(&corrupt).is_err());
+}
+
+#[test]
+#[ignore = "set ARW_SAMPLE to the original Sony DSC01869.ARW"]
+fn original_sony_arw_is_full_resolution_color_with_exposure_and_four_dr_results() {
+    let path = std::path::PathBuf::from(std::env::var_os("ARW_SAMPLE").expect("set ARW_SAMPLE"));
+    let decoded = images::decode_with_dr(&path, true).unwrap();
+    assert!(matches!(decoded.info, Inspection::Dr(_)));
+    let pixels = decoded.image.as_rgb16().unwrap();
+    assert_eq!(pixels.dimensions(), (7008, 4672));
+    assert!(
+        pixels
+            .pixels()
+            .any(|pixel| pixel[0] != pixel[1] || pixel[1] != pixel[2])
+    );
+    assert_eq!(decoded.exposure.iso, Some(100));
+    assert!((decoded.exposure.seconds.unwrap() - 0.004).abs() < 1e-10);
+    assert!((decoded.exposure.aperture.unwrap() - 2.4).abs() < 1e-10);
+    let channels = decoded.color_dynamic_range.unwrap();
+    for dr in channels.iter().chain(decoded.dynamic_range.iter()) {
+        assert!(
+            dr.snr1_stops
+                .is_some_and(|value| value.is_finite() && value >= 0.0)
+        );
+    }
+    eprintln!(
+        "Sony ARW: {}x{}, {}, DR RGB {:?}, Y {:?}",
+        pixels.width(),
+        pixels.height(),
+        decoded.exposure,
+        channels.map(|dr| dr.snr1_stops),
+        decoded.dynamic_range.unwrap().snr1_stops
+    );
 }
 
 #[test]

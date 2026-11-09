@@ -296,7 +296,7 @@ fn large_sixteen_bit_grayscale_decodes_with_default_limits() {
 }
 
 #[test]
-fn rgb_and_alpha_are_standard_display_with_full_range() {
+fn rgb_retains_native_depth_and_alpha_uses_full_range() {
     let tmp = tempdir().unwrap();
     for bits in [8, 12, 16] {
         for channels in 2..=4 {
@@ -312,6 +312,23 @@ fn rgb_and_alpha_are_standard_display_with_full_range() {
             let path = tmp.path().join(format!("{bits}-{channels}.jxl"));
             fs::write(&path, fixture.encode(true)).unwrap();
             let loaded = images::decode(&path).unwrap();
+            if bits > 8 && channels >= 3 {
+                let Inspection::Dr(info) = loaded.info else {
+                    panic!()
+                };
+                assert_eq!(info.code_bits, bits);
+                if channels == 3 {
+                    assert_eq!(loaded.image.as_rgb16().unwrap().as_raw(), &fixture.pixels);
+                } else {
+                    let opacity = (u32::from(maximum / 2 + 1) * 65535 + u32::from(maximum) / 2)
+                        / u32::from(maximum);
+                    assert_eq!(
+                        loaded.image.as_rgba16().unwrap().as_raw(),
+                        &[maximum, 0, maximum / 2 + 1, opacity as u16]
+                    );
+                }
+                continue;
+            }
             assert!(matches!(loaded.info, Inspection::Standard { .. }));
             let expected = match channels {
                 2 => [255, 255, 255, 128],
@@ -339,13 +356,42 @@ fn associated_alpha_is_unpremultiplied_before_display_quantization() {
         let path = tmp.path().join(format!("associated-{channels}.jxl"));
         fs::write(&path, fixture.encode(true)).unwrap();
         let loaded = images::decode(&path).unwrap();
-        assert!(matches!(loaded.info, Inspection::Standard { .. }));
-        let expected = if channels == 2 {
-            [0, 0, 0, 0, 128, 128, 128, 128]
+        if channels == 2 {
+            assert!(matches!(loaded.info, Inspection::Standard { .. }));
+            assert_eq!(
+                loaded.image.as_rgba8().unwrap().as_raw(),
+                &[0, 0, 0, 0, 128, 128, 128, 128]
+            );
         } else {
-            [0, 0, 0, 0, 255, 0, 128, 128]
+            assert!(matches!(loaded.info, Inspection::Dr(_)));
+            assert_eq!(
+                loaded.image.as_rgba16().unwrap().as_raw(),
+                &[0, 0, 0, 0, 65535, 0, 32768, 32768]
+            );
+        }
+    }
+}
+
+#[test]
+fn rgb_preserves_every_native_channel_code() {
+    let tmp = tempdir().unwrap();
+    for bits in [9, 10, 12, 16] {
+        let maximum = (1u32 << bits) - 1;
+        let mut fixture = Fixture::gray(bits);
+        fixture.channels = 3;
+        fixture.width = 256;
+        fixture.height = (maximum + 1) / 256;
+        fixture.pixels = (0..=maximum)
+            .flat_map(|value| [value, maximum - value, (value * 31) & maximum].map(|v| v as u16))
+            .collect();
+        let path = tmp.path().join(format!("rgb-{bits}.jxl"));
+        fs::write(&path, fixture.encode(true)).unwrap();
+        let loaded = images::decode(&path).unwrap();
+        assert_eq!(loaded.image.as_rgb16().unwrap().as_raw(), &fixture.pixels);
+        let Inspection::Dr(info) = loaded.info else {
+            panic!()
         };
-        assert_eq!(loaded.image.as_rgba8().unwrap().as_raw(), &expected);
+        assert_eq!((info.code_bits, info.max_shift), (bits, bits - 8));
     }
 }
 

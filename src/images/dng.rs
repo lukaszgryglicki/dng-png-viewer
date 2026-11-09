@@ -50,8 +50,11 @@ pub(super) fn is_dng(path: &Path) -> Result<bool> {
 }
 
 pub(super) fn decode(path: &Path, display_dr: bool) -> Result<(DynamicImage, Option<Calibration>)> {
-    let raw = rawler::decode_file(path).context("decoding DNG raw samples")?;
-    ensure!(raw.camera.mode == "dng", "input is not a DNG");
+    let raw = rawler::decode_file(path).context("decoding DNG/ARW raw samples")?;
+    ensure!(
+        raw.camera.mode == "dng" || raw.camera.make.eq_ignore_ascii_case("SONY"),
+        "input is not a DNG or Sony ARW"
+    );
     let count = match &raw.data {
         RawImageData::Integer(data) => data.len(),
         RawImageData::Float(data) => data.len(),
@@ -129,7 +132,11 @@ pub(super) fn decode(path: &Path, display_dr: bool) -> Result<(DynamicImage, Opt
                 .context("developing DNG for color display")?
                 .to_dynamic_image()
                 .context("invalid developed DNG buffer")?;
-        DynamicImage::ImageRgba8(developed.into_rgba8())
+        if developed.color().has_color() {
+            developed
+        } else {
+            DynamicImage::ImageLuma8(developed.into_luma8())
+        }
     };
     image.apply_orientation(orientation);
     Ok((image, calibration))

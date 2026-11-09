@@ -3,7 +3,7 @@ name = "dng-png-viewer"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Native fullscreen 16-bit grayscale image windowing for X11 and the text console"
+description = "Native fullscreen 16-bit grayscale/RGB image windowing with DNG/ARW support"
 license = "Apache-2.0"
 
 [features]

@@ -244,9 +244,16 @@ fn bundled_sdl_config_accepts_legacy_minimum_with_current_cmake() {
     fs::write(
         dir.path().join("CMakeLists.txt"),
         "cmake_minimum_required(VERSION 2.8.11)\n\
-         project(sdl_check NONE)\n\
+         project(sdl_check C)\n\
          if(SDL_HIDAPI OR SDL_JOYSTICK OR SDL_HAPTIC OR NOT CMAKE_C_STANDARD EQUAL 99)\n\
            message(FATAL_ERROR \"required SDL toolchain configuration missing\")\n\
+         endif()\n\
+         if(CMAKE_HOST_SYSTEM_NAME STREQUAL \"FreeBSD\")\n\
+           include(CheckIncludeFile)\n\
+           check_include_file(linux/input.h HAVE_LINUX_INPUT_H)\n\
+           if(NOT HAVE_LINUX_INPUT_H)\n\
+             message(FATAL_ERROR \"FreeBSD evdev header was not detected\")\n\
+           endif()\n\
          endif()\n",
     )
     .unwrap();

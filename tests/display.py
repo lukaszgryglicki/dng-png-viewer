@@ -503,7 +503,8 @@ def measured_dr(binary, root, display, display_name):
     result = subprocess.run([str(binary), "-analyze", str(path)],
                             capture_output=True, check=True,
                             env={**os.environ, "SDL_VIDEODRIVER": "not-a-driver", "RAYON_NUM_THREADS": "2"})
-    value = json.loads(result.stdout)["dynamic_range"]["snr1_stops"]
+    record = json.loads(result.stdout)
+    value = record["dynamic_range"]["snr1_stops"]
     assert value is not None and 0 < value < 14, value
     suffix = f"| DR {value:.1f}"
     with viewer(binary, ["-no-display-dr", "-dr", path], root, display_name, "measured-dr.log") as process:
@@ -534,9 +535,12 @@ def measured_dr(binary, root, display, display_name):
     result = subprocess.run([str(binary), "-analyze", str(path)],
                             capture_output=True, check=True,
                             env={**os.environ, "SDL_VIDEODRIVER": "not-a-driver", "RAYON_NUM_THREADS": "2"})
-    value = json.loads(result.stdout)["dynamic_range"]["snr1_stops"]
+    record = json.loads(result.stdout)
+    value = record["dynamic_range"]["snr1_stops"]
     assert value is not None and 0 < value < 8, value
-    suffix = f"| DR {value:.1f}"
+    rgb = [record["color_dynamic_range"][channel]["snr1_stops"] for channel in "rgb"]
+    assert all(value is not None for value in rgb), rgb
+    suffix = f"| DR R {rgb[0]:.1f} G {rgb[1]:.1f} B {rgb[2]:.1f} Y {value:.1f}"
     with viewer(binary, [path], root, display_name, "measured-color-dr.log") as process:
         window = loaded_window(display, process, f"standard 256x128 {suffix}")
         display.keys(window, ["Up", "Down", "space", "z"])
@@ -550,7 +554,45 @@ def measured_dr(binary, root, display, display_name):
         display.keys(window, ["Escape"])
         assert process.wait(timeout=5) == 0
     assert fingerprint(path) == before
-    print("PASS: Gray16/color numeric DR, opt-out and re-enable match headless analysis and preserve pixels", flush=True)
+    path = root / "native-color.png"
+    pixels, rows = [], []
+    for y in range(height):
+        row = []
+        for x in range(width):
+            state = (state * 1664525 + 1013904223) & 0xFFFFFFFF
+            pixel = (200 + (x // 16) * 230 + ((state >> 16) % 21) - 10,
+                     80 + (y // 8) * 170, 1 + ((x * 13 + y * 7) % 1023),
+                     (0, 16384, 32768, 65535)[x % 4])
+            pixels.append(pixel)
+            row.extend(pixel)
+        rows.append(struct.pack(f">{width * 4}H", *row))
+    path.write_bytes(png_bytes(width, height, 16, 6, rows))
+    before = fingerprint(path)
+    result = subprocess.run([str(binary), "-analyze", str(path)], capture_output=True, check=True,
+                            env={**os.environ, "SDL_VIDEODRIVER": "not-a-driver", "RAYON_NUM_THREADS": "2"})
+    record = json.loads(result.stdout)
+    assert record["image"]["code_bits"] == 12, record["image"]
+    assert len(record["color_dynamic_range"]) == 3
+    def label(value):
+        return "unavailable" if value is None else f"{value:.1f}"
+    rgb = [label(record["color_dynamic_range"][channel]["snr1_stops"]) for channel in "rgb"]
+    suffix = f"| DR R {rgb[0]} G {rgb[1]} B {rgb[2]} Y {label(record['dynamic_range']['snr1_stops'])}"
+    with viewer(binary, [path], root, display_name, "native-color-dr.log") as process:
+        window = loaded_window(display, process, f"RGB16 256x128 | 12 code bits | window 4-12 {suffix}")
+        for shift, keys in [(4, ["z"]), (3.8, ["x", "Up", "z"]), (4, ["x", "space", "z"])]:
+            display.keys(window, keys)
+            wait_title(display, window, f"1:1 | RGB16 256x128 | 12 code bits | window {shift:g}-{shift + 8:g} {suffix}")
+            left, top = (WIDTH - width) // 2, (HEIGHT - height) // 2
+            expected = []
+            for index, pixel in enumerate(pixels):
+                alpha = (pixel[3] * 255 + 32767) // 65535
+                rgb = [(min(int(value / (2 ** shift)), 255) * alpha + 127) // 255 for value in pixel[:3]]
+                expected.append((left + index % width, top + index // width, rgb[0] << 16 | rgb[1] << 8 | rgb[2]))
+            frame_matches(display, window, expected)
+        display.keys(window, ["Escape"])
+        assert process.wait(timeout=5) == 0
+    assert fingerprint(path) == before
+    print("PASS: Gray16/RGB DR, native RGBA fractional windows/reset/opacity, opt-out and unchanged inputs", flush=True)
 
 
 def exercise(binary, test_binary, root, display, display_name):

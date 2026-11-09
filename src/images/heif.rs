@@ -49,14 +49,26 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
         .context("reading HEIF color space")?
         == ColorSpace::Monochrome;
     let gray16 = monochrome && !handle.has_alpha_channel() && handle.luma_bits_per_pixel() > 8;
+    let rgb16 = !monochrome
+        && handle
+            .luma_bits_per_pixel()
+            .max(handle.chroma_bits_per_pixel())
+            > 8;
+    let alpha = handle.has_alpha_channel();
     let mut options = DecodingOptions::new().context("allocating HEIF decode options")?;
     options.set_strict_decoding(true);
-    options.set_convert_hdr_to_8bit(!gray16);
+    options.set_convert_hdr_to_8bit(!(gray16 || rgb16));
     let decoded = library
         .decode(
             &handle,
             if gray16 {
                 ColorSpace::Monochrome
+            } else if rgb16 {
+                ColorSpace::Rgb(if alpha {
+                    RgbChroma::HdrRgbaBe
+                } else {
+                    RgbChroma::HdrRgbBe
+                })
             } else {
                 ColorSpace::Rgb(RgbChroma::Rgba)
             },
@@ -85,6 +97,49 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
             ),
             exposure,
         ))
+    } else if rgb16 {
+        let plane = decoded
+            .planes()
+            .interleaved
+            .context("HEIF image has no high-depth RGB plane")?;
+        let channels = if alpha { 4 } else { 3 };
+        ensure!(
+            (9..=16).contains(&plane.bits_per_pixel)
+                && usize::from(plane.storage_bits_per_pixel) == channels * 16,
+            "unsupported HEIF RGB depth"
+        );
+        let maximum = (1u32 << plane.bits_per_pixel) - 1;
+        let (width, height) = (plane.width, plane.height);
+        let mut pixels: Vec<u16> = packed_plane(plane, channels * 2)?
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        if alpha {
+            for pixel in pixels.chunks_exact_mut(4) {
+                let opacity = u32::from(pixel[3]);
+                if decoded.is_premultiplied_alpha() {
+                    for value in &mut pixel[..3] {
+                        *value = (u32::from(*value) * maximum + opacity / 2)
+                            .checked_div(opacity)
+                            .unwrap_or(0)
+                            .min(maximum) as u16;
+                    }
+                }
+                pixel[3] = ((opacity * 65535 + maximum / 2) / maximum) as u16;
+            }
+        }
+        let image = if alpha {
+            DynamicImage::ImageRgba16(
+                ImageBuffer::from_vec(width, height, pixels)
+                    .context("invalid HEIF high-depth RGBA buffer")?,
+            )
+        } else {
+            DynamicImage::ImageRgb16(
+                ImageBuffer::from_vec(width, height, pixels)
+                    .context("invalid HEIF high-depth RGB buffer")?,
+            )
+        };
+        Ok((image, exposure))
     } else {
         let plane = decoded
             .planes()
@@ -107,12 +162,19 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
                 }
             }
         }
-        Ok((
-            DynamicImage::ImageRgba8(
-                ImageBuffer::from_vec(width, height, pixels).context("invalid HEIF RGBA buffer")?,
-            ),
-            exposure,
-        ))
+        let image = DynamicImage::ImageRgba8(
+            ImageBuffer::from_vec(width, height, pixels).context("invalid HEIF RGBA buffer")?,
+        );
+        let image = if monochrome {
+            if alpha {
+                DynamicImage::ImageLumaA8(image.into_luma_alpha8())
+            } else {
+                DynamicImage::ImageLuma8(image.into_luma8())
+            }
+        } else {
+            image
+        };
+        Ok((image, exposure))
     }
 }
 

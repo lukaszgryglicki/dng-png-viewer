@@ -1,6 +1,6 @@
 # dng-png-viewer
 
-A native Rust fullscreen image viewer for exploring **16-bit grayscale samples
+A native Rust fullscreen image viewer for exploring **16-bit grayscale and RGB samples
 through a movable 8-bit display window**. It runs natively on macOS, under
 Xorg/XFCE, or directly on a supported FreeBSD/Linux KMS/DRM text console.
 Ordinary images use normal 8-bit color display.
@@ -8,7 +8,7 @@ Ordinary images use normal 8-bit color display.
 The program decodes images, selects windows, scales/pans, draws and handles keys
 itself. **No external viewer, mpv, FFmpeg executable, helper process or temporary
 rendered image is needed.** SDL2 supplies native window, display and input access;
-DNG, HEIC/HEIF/AVIF, JPEG2000 and JPEG XL decoding also happens in-process. Image files
+DNG/ARW, HEIC/HEIF/AVIF, JPEG2000 and JPEG XL decoding also happens in-process. Image files
 are read-only.
 
 ## Build
@@ -180,9 +180,11 @@ reshuffle the samples. These modes retain more noise/aliasing than averaging.
 
 ## What the DR window means
 
-For an opaque 16-bit grayscale image, the viewer preserves the exact decoded
-unsigned samples, detects the largest sample and computes its **stored code
+For 16-bit grayscale or RGB/RGBA images, the viewer preserves decoded unsigned
+samples, detects the largest color sample and computes its **stored code
 depth**. A maximum of 4095 uses 12 code bits; a maximum of 65535 uses 16.
+RGB uses one shared window across all three channels; alpha is excluded from
+window statistics and retains its original opacity.
 This is not a measurement of camera/sensor stops, noise, scene contrast or
 recoverable photographic information.
 
@@ -204,7 +206,7 @@ step of **0.2 bits**:
 
 | Stored depth | Available labeled windows | Initial window |
 | --- | --- | --- |
-| 8 bits or less in a Gray16 file | 0-8 | 0-8 |
+| 8 bits or less in a Gray16/RGB16 file | 0-8 | 0-8 |
 | 12 bits | 0-8, 0.2-8.2, 0.4-8.4, ... through 4-12 | 4-12 |
 | 16 bits | 0-8 through 8-16, including fifth-bit positions | 8-16 |
 
@@ -234,18 +236,21 @@ calibration and NoiseProfile. No converter executable or sibling checkout is
 required. The calculation runs once during image loading, is cached with the
 pixels, and does not change when panning or adjusting the display window.
 Insufficient evidence is shown as `DR unavailable`. Other Gray16 files use their
-stored samples with zero black level. JPEG and other standard-display images
-use 8-bit luminance after compositing transparency over black, without changing
-their displayed pixels or enabling Gray16 window controls. Neither estimate
+stored samples with zero black level. Color images report independent channel
+estimates and a weighted code-value luminance estimate, for example
+`DR R 11.7 G 10.2 B 10.0 Y 11.2`. High-depth RGB is measured at native precision,
+not from an 8-bit preview; JPEG and other ordinary images use their 8-bit samples.
+Transparency is composited over black for these estimates. Neither estimate
 reconstructs the original DNG's DR: clipping and tone curves change noise
 statistics even when the final compression is lossless. Low-confidence shadow
 proxies are not measurements of how many original camera stops survived.
-`-analyze` includes the full `dynamic_range` result and its method/confidence
-for every image; `-no-dr` omits that field.
+`-analyze` includes the full `dynamic_range` result (luminance for RGB) and its
+method/confidence; color adds `color_dynamic_range` with `r`, `g`, `b` results.
+`-no-dr` omits both fields without disabling native brightness-window controls.
 
 ## Ordinary images and metadata
 
-Supported formats: DNG, PNG, JPEG, HEIC/HEIF (`.heic`, `.heif`, `.hif`), AVIF,
+Supported formats: DNG, Sony ARW, PNG, JPEG, HEIC/HEIF (`.heic`, `.heif`, `.hif`), AVIF,
 JPEG2000 (`.jp2` containers and `.j2k`/`.j2c`/`.jpc` codestreams),
 JPEG XL (`.jxl` containers and raw codestreams),
 GIF, BMP, TIFF, WebP, ICO, PBM/PGM/PPM/PAM/PNM, TGA, QOI, farbfeld (`.ff`),
@@ -255,19 +260,21 @@ not an animation player. Other camera raw formats are not supported.
 
 Integer monochrome DNGs use full-resolution raw samples, not embedded previews.
 The viewer applies the raw crop and orientation but does not subtract the black
-level, stretch to the white level, or apply gamma. Color/CFA DNGs are developed
-to ordinary color; floating-point DNGs also use the ordinary display path.
+level, stretch to the white level, or apply gamma. Color/CFA DNGs and Sony ARWs
+use the existing full-resolution RAW developer, including demosaicing and camera
+WB/calibration, and retain its 16-bit RGB result. Floating-point monochrome DNGs
+use ordinary display. The viewer automatically recognizes color versus monochrome;
+the converter's explicit `--color` mode does not apply to viewing.
 
-Only decoded opaque high-bit-depth integer grayscale images enable DR scrolling:
-Gray16 PNG/TIFF/PGM, integer monochrome DNG, and compatible high-bit-depth
-monochrome HEIC/AVIF/JPEG2000/JPEG XL. Ten- and twelve-bit grayscale HEIF samples and
+Decoded opaque high-depth integer grayscale and high-depth RGB/RGBA enable
+window scrolling: PNG/TIFF/PNM/farbfeld, supported RAWs, and compatible
+HEIC/AVIF/JPEG2000/JPEG XL. Ten- and twelve-bit HEIF samples and
 9-16-bit JPEG2000/JPEG XL samples retain their decoded code values in 16-bit storage,
 without stretching them to 65535. Signed JPEG2000 samples are biased into the
 corresponding unsigned code range. Unsupported JPEG2000 precision, subsampling
 or color/alpha layouts produce explicit errors rather than guessed colors.
-Eight-bit grayscale, RGB, RGBA, palette and grayscale-with-alpha images use the
-ordinary display path. Higher-precision color images, including 10/12-bit HEIC,
-are converted to 8-bit color; they do not enable DR scrolling.
+Eight-bit grayscale/RGB/RGBA, palette and grayscale-with-alpha images use the
+ordinary display path. Floating-point raster formats also retain ordinary display.
 Alpha is composited over black with premultiplied interpolation. Decoder-provided
 EXIF orientation is applied before layout and statistics.
 JPEG XL uses its codestream orientation, which takes precedence over EXIF.

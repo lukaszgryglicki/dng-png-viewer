@@ -76,6 +76,102 @@ fn default_window_and_fit_keys_follow_the_specification() {
 }
 
 #[test]
+fn native_rgb_windows_preserve_all_codes_and_do_not_window_opacity() {
+    for alpha in [false, true] {
+        let source = if alpha {
+            DynamicImage::ImageRgba16(ImageBuffer::from_fn(256, 256, |x, y| {
+                let value = (y * 256 + x) as u16;
+                Rgba([
+                    value,
+                    65535 - value,
+                    value.wrapping_mul(7),
+                    [0, 16384, 32768, 65535][x as usize % 4],
+                ])
+            }))
+        } else {
+            DynamicImage::ImageRgb16(ImageBuffer::from_fn(256, 256, |x, y| {
+                let value = (y * 256 + x) as u16;
+                Rgb([value, 65535 - value, value.wrapping_mul(7)])
+            }))
+        };
+        let image = LoadedImage::new(source).unwrap();
+        for shift in [0.0, 0.2, 3.8, 4.0, 8.0] {
+            let view = View {
+                mode: Mode::Native,
+                shift,
+                ..View::default()
+            };
+            let frame = view::render(&image, &view, size(256, 256)).unwrap();
+            for (index, pixel) in frame.chunks_exact(3).enumerate() {
+                let value = index as u16;
+                let opacity = if alpha {
+                    ([0u32, 16384, 32768, 65535][index % 4] * 255 + 32767) / 65535
+                } else {
+                    255
+                };
+                let expected = [value, 65535 - value, value.wrapping_mul(7)].map(|value| {
+                    let bright = (f64::from(value) / shift.exp2()).min(255.0) as u32;
+                    ((bright * opacity + 127) / 255) as u8
+                });
+                assert_eq!(
+                    pixel, expected,
+                    "code {value}, shift {shift}, alpha {alpha}"
+                );
+            }
+        }
+    }
+    let image = LoadedImage::new(DynamicImage::ImageRgba16(ImageBuffer::from_pixel(
+        1,
+        1,
+        Rgba([15, 31, 63, 65535]),
+    )))
+    .unwrap();
+    let Inspection::Dr(info) = image.info else {
+        panic!()
+    };
+    assert_eq!(
+        (
+            info.minimum,
+            info.maximum,
+            info.occupied_levels,
+            info.code_bits
+        ),
+        (15, 63, 3, 6)
+    );
+    assert_eq!(info.initial_shift, 0);
+}
+
+#[test]
+fn rgb_brightness_reset_and_zoom_share_the_grayscale_controls() {
+    let image = LoadedImage::new(DynamicImage::ImageRgb16(ImageBuffer::from_pixel(
+        1000,
+        800,
+        Rgb([4095, 1023, 255]),
+    )))
+    .unwrap();
+    let viewport = size(200, 100);
+    let mut view = View::new(&image.info);
+    assert_eq!(view.shift, 4.0);
+    for key in [Key::Up, Key::Native, Key::Left, Key::Up] {
+        view.handle(key, &image.info, image.size(), viewport);
+    }
+    assert_eq!((view.shift, view.pan_x, view.pan_y), (3.8, 64, 64));
+    view.handle(Key::Reset, &image.info, image.size(), viewport);
+    assert_eq!((view.shift, view.pan_x, view.pan_y), (3.8, 0, 0));
+    view.handle(Key::Fit, &image.info, image.size(), viewport);
+    view.handle(Key::Reset, &image.info, image.size(), viewport);
+    assert_eq!(view.shift, 4.0);
+    for _ in 0..25 {
+        view.handle(Key::Up, &image.info, image.size(), viewport);
+    }
+    assert_eq!(view.shift, 0.0);
+    for _ in 0..25 {
+        view.handle(Key::Down, &image.info, image.size(), viewport);
+    }
+    assert_eq!(view.shift, 4.0);
+}
+
+#[test]
 fn native_arrows_pan_toward_the_requested_edge_and_x_preserves_window() {
     let image = gray(1000, 800, vec![4095; 800000]);
     let viewport = size(200, 100);
@@ -915,6 +1011,7 @@ fn standard_image_caption_shows_numeric_and_unavailable_dr_without_bit_windows()
         assert!(title.ends_with("| DR 6.7"), "{title}");
         assert!(!title.contains("| window"), "{title}");
     }
+
     image.dynamic_range = Some(DynamicRange::estimate(
         &NoiseEstimate::default(),
         0.0,
@@ -923,4 +1020,46 @@ fn standard_image_caption_shows_numeric_and_unavailable_dr_without_bit_windows()
         true,
     ));
     assert!(backend::title(0, &paths, Some(&image), &view, "").ends_with("| DR unavailable"));
+}
+
+#[test]
+fn color_caption_labels_rgb_and_luminance_dr_without_losing_exposure() {
+    use dng_monochrome::noise::{DynamicRange, NoiseEstimate};
+    use dng_png_viewer::images::Exposure;
+    let paths = vec![PathBuf::from("color.png")];
+    let mut image = LoadedImage::new(DynamicImage::ImageRgb16(ImageBuffer::from_pixel(
+        1,
+        1,
+        Rgb([4095, 1023, 255]),
+    )))
+    .unwrap();
+    let estimate = |value: f64| {
+        DynamicRange::estimate(
+            &NoiseEstimate {
+                dark_sigma_codes: Some(1.0),
+                ..NoiseEstimate::default()
+            },
+            0.0,
+            0.0,
+            value.exp2(),
+            true,
+        )
+    };
+    image.color_dynamic_range = Some([estimate(11.74), estimate(10.24), estimate(9.96)]);
+    image.dynamic_range = Some(estimate(11.21));
+    image.exposure = Exposure {
+        iso: Some(100),
+        seconds: Some(0.004),
+        aperture: Some(2.4),
+    };
+    let mut view = View::new(&image.info);
+    for key in [Key::Up, Key::Native, Key::Reset, Key::Fit, Key::Reset] {
+        view.handle(key, &image.info, image.size(), size(100, 100));
+        let title = backend::title(0, &paths, Some(&image), &view, "");
+        assert!(title.contains("RGB16 1x1"), "{title}");
+        assert!(
+            title.ends_with("| DR R 11.7 G 10.2 B 10.0 Y 11.2 | ISO 100 | 1/250s | f2.4"),
+            "{title}"
+        );
+    }
 }

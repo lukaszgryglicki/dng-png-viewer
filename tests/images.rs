@@ -415,8 +415,10 @@ fn png_variants_preserve_native_rgb_and_standard_fallbacks() {
                 _ => panic!("missing native RGB data: {name}"),
             };
             let expected: Vec<_> = data
-                .chunks_exact(2)
-                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_be_bytes(*pair))
                 .collect();
             assert_eq!(*actual, expected);
             continue;

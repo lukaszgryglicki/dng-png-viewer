@@ -217,7 +217,9 @@ fn signed_and_unsigned_rgb_preserve_every_native_channel_code() {
             fixture.planes = (0..3)
                 .map(|channel| {
                     expected
-                        .chunks_exact(3)
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
                         .map(|pixel| i32::from(pixel[channel]) - offset)
                         .collect()
                 })

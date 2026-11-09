@@ -102,7 +102,7 @@ fn native_rgb_windows_preserve_all_codes_and_do_not_window_opacity() {
                 ..View::default()
             };
             let frame = view::render(&image, &view, size(256, 256)).unwrap();
-            for (index, pixel) in frame.chunks_exact(3).enumerate() {
+            for (index, pixel) in frame.as_chunks::<3>().0.iter().enumerate() {
                 let value = index as u16;
                 let opacity = if alpha {
                     ([0u32, 16384, 32768, 65535][index % 4] * 255 + 32767) / 65535
@@ -114,7 +114,7 @@ fn native_rgb_windows_preserve_all_codes_and_do_not_window_opacity() {
                     ((bright * opacity + 127) / 255) as u8
                 });
                 assert_eq!(
-                    pixel, expected,
+                    *pixel, expected,
                     "code {value}, shift {shift}, alpha {alpha}"
                 );
             }

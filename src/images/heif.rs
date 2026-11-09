@@ -111,11 +111,13 @@ pub(super) fn decode(path: &Path) -> Result<(DynamicImage, Exposure)> {
         let maximum = (1u32 << plane.bits_per_pixel) - 1;
         let (width, height) = (plane.width, plane.height);
         let mut pixels: Vec<u16> = packed_plane(plane, channels * 2)?
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_be_bytes(*pair))
             .collect();
         if alpha {
-            for pixel in pixels.chunks_exact_mut(4) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
                 let opacity = u32::from(pixel[3]);
                 if decoded.is_premultiplied_alpha() {
                     for value in &mut pixel[..3] {

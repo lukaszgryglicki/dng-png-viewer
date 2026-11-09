@@ -448,4 +448,4 @@ entry point refuses physical consoles and is not included in the normal viewer.
 
 ## License
 
-Apache-2.0; see [LICENSE](LICENSE).
+AGPL-3.0-only; see [LICENSE](LICENSE).

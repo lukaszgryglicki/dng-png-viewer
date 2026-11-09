@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Native fullscreen 16-bit grayscale/RGB image windowing with DNG/ARW support"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 
 [features]
 default = ["bundled-heif"]

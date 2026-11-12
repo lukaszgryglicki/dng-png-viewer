@@ -3,8 +3,10 @@ use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageBuffer, metadata::Orientation};
 use rawler::{
     RawImageData,
+    decoders::RawDecodeParams,
     imgop::{Dim2, Point, Rect, develop::RawDevelop},
     rawimage::RawPhotometricInterpretation,
+    rawsource::RawSource,
 };
 use std::{
     fs::File,
@@ -50,7 +52,20 @@ pub(super) fn is_dng(path: &Path) -> Result<bool> {
 }
 
 pub(super) fn decode(path: &Path, display_dr: bool) -> Result<(DynamicImage, Option<Calibration>)> {
-    let raw = rawler::decode_file(path).context("decoding DNG/ARW raw samples")?;
+    let source = RawSource::new(path).context("decoding DNG/ARW raw samples")?;
+    let params = RawDecodeParams::default();
+    let mut raw = rawler::decode(&source, &params).context("decoding DNG/ARW raw samples")?;
+    // Sony ARW records the camera rotation only in EXIF, not with the raw raster.
+    if let Ok(Some(orientation)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let decoder = rawler::get_decoder(&source).ok()?;
+        decoder
+            .raw_metadata(&source, &params)
+            .ok()?
+            .exif
+            .orientation
+    })) {
+        raw.orientation = rawler::Orientation::from_u16(orientation);
+    }
     ensure!(
         raw.camera.mode == "dng" || raw.camera.make.eq_ignore_ascii_case("SONY"),
         "input is not a DNG or Sony ARW"

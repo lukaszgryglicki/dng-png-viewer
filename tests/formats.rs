@@ -704,6 +704,17 @@ fn original_sony_arw_is_full_resolution_color_with_exposure_and_four_dr_results(
 }
 
 #[test]
+#[ignore = "set ARW_PORTRAIT_SAMPLE to the original portrait Sony DSC01882.ARW"]
+fn original_portrait_sony_arw_follows_its_exif_rotation() {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("ARW_PORTRAIT_SAMPLE").expect("set ARW_PORTRAIT_SAMPLE"),
+    );
+    // Sony records the camera rotation only in EXIF, not with the raw raster.
+    let decoded = images::decode(&path).unwrap();
+    assert_eq!(decoded.image.as_rgb16().unwrap().dimensions(), (4672, 7008));
+}
+
+#[test]
 fn heic_container_orientation_is_applied_to_high_precision_pixels() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("rotated.heic");
